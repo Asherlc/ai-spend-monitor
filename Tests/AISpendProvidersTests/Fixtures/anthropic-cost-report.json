@@ -1,0 +1,33 @@
+{
+  "data": [
+    {
+      "starting_at": "2026-06-01T00:00:00Z",
+      "ending_at": "2026-06-02T00:00:00Z",
+      "results": [
+        {
+          "amount": "125.50",
+          "currency": "USD",
+          "cost_type": "tokens",
+          "description": "Tokens",
+          "model": "claude-sonnet-4-5"
+        },
+        {
+          "amount": "0.25",
+          "currency": "USD",
+          "cost_type": "web_search",
+          "description": "Web Search",
+          "model": null
+        },
+        {
+          "amount": "10.05",
+          "currency": "USD",
+          "cost_type": "code_execution",
+          "description": "Code Execution",
+          "model": null
+        }
+      ]
+    }
+  ],
+  "has_more": true,
+  "next_page": "anthropic-page-2"
+}

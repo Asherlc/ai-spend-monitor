@@ -1,0 +1,5 @@
+{
+  "cursorAuth/accessToken": "cursor-access-secret",
+  "cursorAuth/cachedEmail": "cursor@example.com",
+  "cursorAuth/teamId": "team-secret-id"
+}
