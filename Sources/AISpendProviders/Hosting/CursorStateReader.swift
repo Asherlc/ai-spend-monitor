@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SQLite3
 
@@ -18,6 +19,7 @@ public struct CursorStateReader: Sendable {
 
   private let allowedDatabaseURL: URL
   private let allowedRootURL: URL
+  private let relativeComponents: [String]
 
   public init() {
     let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL
@@ -26,11 +28,15 @@ public struct CursorStateReader: Sendable {
       .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
       .standardizedFileURL
     allowedRootURL = home
+    relativeComponents = [
+      "Library", "Application Support", "Cursor", "User", "globalStorage", "state.vscdb",
+    ]
   }
 
   init(allowedDatabaseURL: URL) {
     self.allowedDatabaseURL = allowedDatabaseURL.standardizedFileURL
     allowedRootURL = allowedDatabaseURL.deletingLastPathComponent().standardizedFileURL
+    relativeComponents = [allowedDatabaseURL.lastPathComponent]
   }
 
   public func read() throws -> CursorState {
@@ -39,18 +45,20 @@ public struct CursorStateReader: Sendable {
 
   func read(at url: URL) throws -> CursorState {
     let requested = url.standardizedFileURL
-    let resolvedRoot = allowedRootURL.resolvingSymlinksInPath()
-    let resolvedRequest = requested.resolvingSymlinksInPath()
-    guard requested == allowedDatabaseURL,
-      resolvedRequest.path.hasPrefix(resolvedRoot.path + "/")
-    else {
+    guard requested == allowedDatabaseURL else {
       throw SourceHostError.pathNotAllowed
     }
+
+    let descriptor = try SecureFileReader.openFile(
+      root: allowedRootURL,
+      relativeComponents: relativeComponents
+    )
+    defer { Darwin.close(descriptor) }
 
     var database: OpaquePointer?
     guard
       sqlite3_open_v2(
-        requested.path,
+        "/dev/fd/\(descriptor)",
         &database,
         SQLITE_OPEN_READONLY,
         nil

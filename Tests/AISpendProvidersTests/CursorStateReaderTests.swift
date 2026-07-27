@@ -7,6 +7,48 @@ import XCTest
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 final class CursorStateReaderTests: XCTestCase {
+  func testRejectsSymlinkDirectoryComponentInsideRoot() throws {
+    let home = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let realDirectory = home.appendingPathComponent("real-cursor")
+    try FileManager.default.createDirectory(
+      at: realDirectory,
+      withIntermediateDirectories: true
+    )
+    let realDatabase = realDirectory.appendingPathComponent("state.vscdb")
+    try makeDatabase(at: realDatabase, values: [:])
+    let linkedDirectory = home.appendingPathComponent("linked-cursor")
+    try FileManager.default.createSymbolicLink(
+      at: linkedDirectory,
+      withDestinationURL: realDirectory
+    )
+    let allowedDatabase = linkedDirectory.appendingPathComponent("state.vscdb")
+
+    XCTAssertThrowsError(
+      try CursorStateReader(allowedDatabaseURL: allowedDatabase).read(at: allowedDatabase)
+    ) {
+      XCTAssertEqual($0 as? SourceHostError, .pathNotAllowed)
+    }
+  }
+
+  func testRejectsAllowlistedSymlinkToDifferentDatabaseInsideRoot() throws {
+    let root = try temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let differentDatabase = root.appendingPathComponent("different.vscdb")
+    try makeDatabase(at: differentDatabase, values: [:])
+    let allowedDatabase = root.appendingPathComponent("state.vscdb")
+    try FileManager.default.createSymbolicLink(
+      at: allowedDatabase,
+      withDestinationURL: differentDatabase
+    )
+
+    XCTAssertThrowsError(
+      try CursorStateReader(allowedDatabaseURL: allowedDatabase).read(at: allowedDatabase)
+    ) {
+      XCTAssertEqual($0 as? SourceHostError, .pathNotAllowed)
+    }
+  }
+
   func testRejectsAllowlistedSymlinkEscapingItsRoot() throws {
     let root = try temporaryDirectory()
     let outside = try temporaryDirectory()
