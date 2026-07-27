@@ -116,7 +116,7 @@ public final class RefreshCoordinator {
     calendarProvider: @escaping @Sendable () -> Calendar = {
       .autoupdatingCurrent
     },
-    timeout: TimeInterval = 20,
+    timeout: TimeInterval = 45,
     withTimeout: @escaping ProviderTimeout = RefreshCoordinator.withTimeout,
     sanitizer: DiagnosticSanitizer = DiagnosticSanitizer()
   ) {

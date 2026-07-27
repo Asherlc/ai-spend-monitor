@@ -5,6 +5,39 @@ import XCTest
 @testable import AISpendProviders
 
 final class CodexLogScannerTests: XCTestCase {
+  func testSkipsIrrelevantLinesBeforeJSONDecoding() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("large-session.jsonl")
+    let irrelevant = Data(repeating: 0x78, count: 262_144)
+    let usage = Data(
+      """
+      {"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}
+      {"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","event_id":"event-1","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":100}}}}
+
+      """.utf8
+    )
+    var contents = irrelevant
+    contents.append(0x0A)
+    contents.append(usage)
+    try contents.write(to: file)
+    try setModificationDate(file)
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar
+    ).scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(result.records.count, 1)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
   func testScansStreamsDeduplicatesAndAggregatesOneRecordPerModelDay() throws {
     let root = try fixtureRoot(named: "codex-session")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -34,7 +67,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertEqual(record.estimate?.cachedInputTokens, 200_000)
     XCTAssertEqual(record.estimate?.outputTokens, 100_000)
     XCTAssertEqual(record.estimate?.catalogVersion, "2026-07-27")
-    XCTAssertEqual(result.diagnostics.count, 1)
+    XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
   func testUnknownModelProducesUnavailableDiagnosticAndNoZeroRecord() throws {

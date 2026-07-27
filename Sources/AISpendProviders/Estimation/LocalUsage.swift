@@ -52,12 +52,30 @@ public struct LocalLogScanResult: Sendable {
 
 struct LocalLogScanner {
   typealias UsageParser = @Sendable ([String: Any], inout LogParseContext) -> LocalUsage?
+  typealias CandidateLine = @Sendable (Data) -> Bool
 
   let provider: ProviderID
   let sessionRoots: [URL]
   let priceCatalog: PriceCatalog
   let calendar: Calendar
+  let candidateLine: CandidateLine
   let parser: UsageParser
+
+  init(
+    provider: ProviderID,
+    sessionRoots: [URL],
+    priceCatalog: PriceCatalog,
+    calendar: Calendar,
+    candidateLine: @escaping CandidateLine = { _ in true },
+    parser: @escaping UsageParser
+  ) {
+    self.provider = provider
+    self.sessionRoots = sessionRoots
+    self.priceCatalog = priceCatalog
+    self.calendar = calendar
+    self.candidateLine = candidateLine
+    self.parser = parser
+  }
 
   func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
     try Task.checkCancellation()
@@ -70,6 +88,9 @@ struct LocalLogScanner {
         var parserContext = LogParseContext(relativePath: relativePath(file.url, to: file.root))
         try scan(file: file.url, relativeTo: file.root) { data, lineNumber in
           parserContext.lineNumber = lineNumber
+          guard data.isEmpty || candidateLine(data) else {
+            return
+          }
           guard
             let object = try? JSONSerialization.jsonObject(with: data),
             let dictionary = object as? [String: Any]
@@ -245,16 +266,22 @@ struct LocalLogScanner {
         break
       }
       buffer.append(chunk)
-      while let newline = buffer.firstIndex(of: 0x0A) {
+      var lineStart = buffer.startIndex
+      while lineStart < buffer.endIndex,
+        let newline = buffer[lineStart...].firstIndex(of: 0x0A)
+      {
         lineNumber += 1
-        let line = buffer[..<newline]
-        buffer.removeSubrange(...newline)
+        let line = buffer[lineStart..<newline]
         if discardingOversizedLine {
           discardingOversizedLine = false
           process(Data(), lineNumber)
         } else if !line.isEmpty {
           process(Data(line), lineNumber)
         }
+        lineStart = buffer.index(after: newline)
+      }
+      if lineStart > buffer.startIndex {
+        buffer.removeSubrange(buffer.startIndex..<lineStart)
       }
       if buffer.count > maximumLineBytes {
         discardingOversizedLine = true
@@ -310,6 +337,11 @@ struct LogParseContext {
   var model: String?
   let relativePath: String
   var lineNumber = 0
+  private let timestampFormatter = ISO8601DateFormatter()
+
+  func parseTimestamp(_ value: String) -> Date? {
+    timestampFormatter.date(from: value)
+  }
 }
 
 private struct BilledUsageKey: Hashable {
