@@ -1,0 +1,281 @@
+import AISpendCore
+import CryptoKit
+import Darwin
+import Foundation
+
+public struct LocalUsage: Hashable, Sendable {
+  public let eventID: String
+  public let timestamp: Date
+  public let model: String
+  public let inputTokens: Int
+  public let cacheCreationInputTokens: Int
+  public let cachedInputTokens: Int
+  public let outputTokens: Int
+
+  public init(
+    eventID: String,
+    timestamp: Date,
+    model: String,
+    inputTokens: Int,
+    cacheCreationInputTokens: Int = 0,
+    cachedInputTokens: Int,
+    outputTokens: Int
+  ) {
+    self.eventID = eventID
+    self.timestamp = timestamp
+    self.model = model
+    self.inputTokens = inputTokens
+    self.cacheCreationInputTokens = cacheCreationInputTokens
+    self.cachedInputTokens = cachedInputTokens
+    self.outputTokens = outputTokens
+  }
+}
+
+public enum LocalLogDiagnostic: Hashable, Sendable {
+  case malformedLine(file: String, line: Int)
+  case sourceUnavailable(file: String)
+  case unavailableEstimate(model: String)
+}
+
+public struct LocalLogScanResult: Sendable {
+  public let records: [SpendRecord]
+  public let diagnostics: [LocalLogDiagnostic]
+
+  public init(records: [SpendRecord], diagnostics: [LocalLogDiagnostic]) {
+    self.records = records
+    self.diagnostics = diagnostics
+  }
+}
+
+struct LocalLogScanner {
+  typealias UsageParser = @Sendable ([String: Any], inout String?) -> LocalUsage?
+
+  let provider: ProviderID
+  let sessionRoots: [URL]
+  let priceCatalog: PriceCatalog
+  let calendar: Calendar
+  let parser: UsageParser
+
+  func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
+    var diagnostics: [LocalLogDiagnostic] = []
+    var usageByID: [String: LocalUsage] = [:]
+
+    for file in candidateFiles(window: window, diagnostics: &diagnostics) {
+      do {
+        var parserContext: String?
+        try scan(file: file.url, relativeTo: file.root) { data, lineNumber in
+          guard
+            let object = try? JSONSerialization.jsonObject(with: data),
+            let dictionary = object as? [String: Any]
+          else {
+            diagnostics.append(
+              .malformedLine(file: file.url.lastPathComponent, line: lineNumber)
+            )
+            return
+          }
+          guard
+            let usage = parser(dictionary, &parserContext),
+            window.contains(usage.timestamp)
+          else {
+            return
+          }
+          usageByID[usage.eventID] = usageByID[usage.eventID] ?? usage
+        }
+      } catch {
+        diagnostics.append(.sourceUnavailable(file: file.url.lastPathComponent))
+      }
+    }
+
+    let groups = Dictionary(grouping: usageByID.values) { usage in
+      UsageDay(
+        start: calendar.startOfDay(for: usage.timestamp),
+        model: usage.model
+      )
+    }
+    var records: [SpendRecord] = []
+    for (day, usages) in groups.sorted(by: { $0.key < $1.key }) {
+      let aggregate = LocalUsage(
+        eventID: usages.map(\.eventID).sorted().joined(separator: ","),
+        timestamp: day.start,
+        model: day.model,
+        inputTokens: usages.reduce(0) { $0 + $1.inputTokens },
+        cacheCreationInputTokens: usages.reduce(0) { $0 + $1.cacheCreationInputTokens },
+        cachedInputTokens: usages.reduce(0) { $0 + $1.cachedInputTokens },
+        outputTokens: usages.reduce(0) { $0 + $1.outputTokens }
+      )
+      let amount: Money
+      do {
+        amount = try priceCatalog.estimate(aggregate)
+      } catch PriceCatalogError.unknownModel {
+        diagnostics.append(.unavailableEstimate(model: day.model))
+        continue
+      }
+      guard let intervalEnd = calendar.date(byAdding: .day, value: 1, to: day.start) else {
+        continue
+      }
+      let observationID = Self.observationID(
+        provider: provider,
+        model: day.model,
+        day: day.start,
+        eventIDs: usages.map(\.eventID)
+      )
+      records.append(
+        try SpendRecord(
+          id: observationID,
+          provider: provider,
+          accountFingerprint: "local",
+          model: day.model,
+          intervalStart: day.start,
+          intervalEnd: intervalEnd,
+          amount: amount,
+          quality: .estimated,
+          sourceID: "\(provider.rawValue)-local-logs",
+          observationID: observationID,
+          fetchedAt: fetchedAt,
+          estimate: EstimateMetadata(
+            inputTokens: aggregate.inputTokens + aggregate.cacheCreationInputTokens,
+            cachedInputTokens: aggregate.cachedInputTokens,
+            outputTokens: aggregate.outputTokens,
+            catalogVersion: priceCatalog.version
+          )
+        )
+      )
+    }
+
+    return LocalLogScanResult(
+      records: records,
+      diagnostics: diagnostics.sorted(by: diagnosticOrder)
+    )
+  }
+
+  private func candidateFiles(
+    window: MonthWindow,
+    diagnostics: inout [LocalLogDiagnostic]
+  ) -> [(root: URL, url: URL)] {
+    let keys: [URLResourceKey] = [
+      .contentModificationDateKey,
+      .isDirectoryKey,
+      .isRegularFileKey,
+      .isSymbolicLinkKey,
+    ]
+    var files: [(root: URL, url: URL)] = []
+    for root in sessionRoots.map(\.standardizedFileURL) {
+      guard
+        let enumerator = FileManager.default.enumerator(
+          at: root,
+          includingPropertiesForKeys: keys,
+          options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        )
+      else {
+        diagnostics.append(.sourceUnavailable(file: root.lastPathComponent))
+        continue
+      }
+      while let item = enumerator.nextObject() as? URL {
+        guard let values = try? item.resourceValues(forKeys: Set(keys)) else {
+          diagnostics.append(.sourceUnavailable(file: item.lastPathComponent))
+          enumerator.skipDescendants()
+          continue
+        }
+        if values.isSymbolicLink == true {
+          enumerator.skipDescendants()
+          continue
+        }
+        guard values.isRegularFile == true, item.pathExtension == "jsonl",
+          let modified = values.contentModificationDate,
+          modified >= window.start,
+          modified < window.end
+        else {
+          continue
+        }
+        files.append((root, item.standardizedFileURL))
+      }
+    }
+    return files.sorted { lhs, rhs in
+      if lhs.root.path != rhs.root.path {
+        return lhs.root.path < rhs.root.path
+      }
+      return lhs.url.path < rhs.url.path
+    }
+  }
+
+  private func scan(
+    file: URL,
+    relativeTo root: URL,
+    process: (Data, Int) -> Void
+  ) throws {
+    let rootComponents = root.standardizedFileURL.pathComponents
+    let fileComponents = file.standardizedFileURL.pathComponents
+    guard fileComponents.starts(with: rootComponents) else {
+      throw SourceHostError.pathNotAllowed
+    }
+    let relativeComponents = Array(fileComponents.dropFirst(rootComponents.count))
+    let descriptor = try SecureFileReader.openFile(
+      root: root,
+      relativeComponents: relativeComponents
+    )
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    var buffer = Data()
+    var lineNumber = 0
+    var discardingOversizedLine = false
+    let maximumLineBytes = 1_048_576
+
+    while true {
+      let chunk = try handle.read(upToCount: 65_536) ?? Data()
+      if chunk.isEmpty {
+        if !buffer.isEmpty && !discardingOversizedLine {
+          lineNumber += 1
+          process(buffer, lineNumber)
+        }
+        break
+      }
+      buffer.append(chunk)
+      while let newline = buffer.firstIndex(of: 0x0A) {
+        lineNumber += 1
+        let line = buffer[..<newline]
+        buffer.removeSubrange(...newline)
+        if discardingOversizedLine {
+          discardingOversizedLine = false
+          process(Data(), lineNumber)
+        } else if !line.isEmpty {
+          process(Data(line), lineNumber)
+        }
+      }
+      if buffer.count > maximumLineBytes {
+        discardingOversizedLine = true
+        buffer.removeAll(keepingCapacity: true)
+      }
+    }
+  }
+
+  private static func observationID(
+    provider: ProviderID,
+    model: String,
+    day: Date,
+    eventIDs: [String]
+  ) -> String {
+    let dayValue = ISO8601DateFormatter().string(from: day)
+    let input = ([provider.rawValue, model, dayValue] + eventIDs.sorted())
+      .joined(separator: "\u{1f}")
+    let digest = SHA256.hash(data: Data(input.utf8))
+    return digest.map { String(format: "%02x", $0) }.joined()
+  }
+}
+
+private struct UsageDay: Hashable, Comparable {
+  let start: Date
+  let model: String
+
+  static func < (lhs: UsageDay, rhs: UsageDay) -> Bool {
+    if lhs.start != rhs.start {
+      return lhs.start < rhs.start
+    }
+    return lhs.model < rhs.model
+  }
+}
+
+private func diagnosticOrder(
+  _ lhs: LocalLogDiagnostic,
+  _ rhs: LocalLogDiagnostic
+) -> Bool {
+  String(describing: lhs) < String(describing: rhs)
+}
