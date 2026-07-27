@@ -143,7 +143,7 @@ Priority:
 
 Only usage-based events contribute to spend. Included-in-plan usage and seat charges are excluded.
 
-Cursor's documented team usage events contain model, usage kind, token usage, and request cost fields. The adapter retains only the normalized monetary records needed by the app.
+Cursor's documented `/teams/spend` endpoint supplies authoritative `spendCents` for the current calendar month. Its filtered usage events supply model, usage kind, token usage, and `tokenUsage.totalCents` for model attribution. The adapter ignores `requestsCosts` because it is denominated in request units, reconciles model-attributed cents to the team spend total, and assigns any positive unattributed remainder to model `unknown`. If model event costs conflict by exceeding the authoritative total, the app shows the provider total under `unknown` and reports a diagnostic rather than scaling or guessing.
 
 ### Claude
 
