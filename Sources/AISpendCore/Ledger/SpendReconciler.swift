@@ -22,6 +22,7 @@ public struct SpendReconciler: Sendable {
   public func reconcile(_ records: [SpendRecord]) -> ReconciliationResult {
     var recordsByObservation: [ObservationKey: SpendRecord] = [:]
     var excludedRecordIDs: Set<String> = []
+    var excludedEstimatedAmount = Money.zero
 
     for record in records.sorted(by: Self.prefersForDuplicateObservation) {
       let key = ObservationKey(record: record)
@@ -29,6 +30,9 @@ public struct SpendReconciler: Sendable {
         recordsByObservation[key] = record
       } else {
         excludedRecordIDs.insert(record.id)
+        if record.quality == .estimated {
+          excludedEstimatedAmount = excludedEstimatedAmount + record.amount
+        }
       }
     }
 
@@ -38,7 +42,6 @@ public struct SpendReconciler: Sendable {
       by: BillingGroup.init(record:)
     )
     var included: [SpendRecord] = []
-    var excludedEstimatedAmount = Money.zero
 
     for record in deduplicated {
       let isCoveredEstimate =

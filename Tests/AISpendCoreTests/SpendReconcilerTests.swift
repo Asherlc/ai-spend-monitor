@@ -152,6 +152,62 @@ final class SpendReconcilerTests: XCTestCase {
     XCTAssertEqual(result.included.map(\.id), ["a", "cursor"])
   }
 
+  func testEstimatedDuplicateOfActualContributesExcludedAmount() throws {
+    let start = Date(timeIntervalSince1970: 1_704_067_200)
+    let end = start.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "actual",
+      start: start,
+      end: end,
+      amount: 10,
+      quality: .actual,
+      observationID: "same-observation"
+    )
+    let estimate = try record(
+      id: "estimate",
+      start: start,
+      end: end,
+      amount: 12,
+      quality: .estimated,
+      observationID: "same-observation"
+    )
+
+    let result = SpendReconciler().reconcile([estimate, actual])
+
+    XCTAssertEqual(result.included.map(\.id), [actual.id])
+    XCTAssertEqual(result.excludedRecordIDs, [estimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, Money(12))
+  }
+
+  func testPartiallyOverlappingEstimateIsFullyExcluded() throws {
+    let dayOne = Date(timeIntervalSince1970: 1_704_067_200)
+    let dayTwo = dayOne.addingTimeInterval(86_400)
+    let dayThree = dayTwo.addingTimeInterval(86_400)
+    let dayFour = dayThree.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "actual",
+      start: dayOne,
+      end: dayThree,
+      amount: 10,
+      quality: .actual
+    )
+    let partiallyOverlappingEstimate = try record(
+      id: "partially-overlapping-estimate",
+      start: dayTwo,
+      end: dayFour,
+      amount: 12,
+      quality: .estimated
+    )
+
+    let result = SpendReconciler().reconcile([
+      partiallyOverlappingEstimate, actual,
+    ])
+
+    XCTAssertEqual(result.included.map(\.id), [actual.id])
+    XCTAssertEqual(result.excludedRecordIDs, [partiallyOverlappingEstimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, Money(12))
+  }
+
   private func record(
     id: String,
     provider: ProviderID = .claude,
