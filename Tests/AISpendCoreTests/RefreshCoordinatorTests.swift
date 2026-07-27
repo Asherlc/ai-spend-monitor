@@ -556,6 +556,11 @@ final class RefreshCoordinatorTests: XCTestCase {
     let snapshot = await coordinator.refresh(reason: .launch)
 
     XCTAssertTrue(snapshot.summary.isPartial)
+    XCTAssertEqual(snapshot.summary.total, .zero)
+    XCTAssertEqual(snapshot.dataAvailability, .available)
+    XCTAssertEqual(snapshot.providerAvailability[.claude], .available)
+    XCTAssertEqual(snapshot.pacing.projection, .zero)
+    XCTAssertTrue(snapshot.pacing.budgets.isEmpty)
     let messages: [String] = snapshot.attempts[.claude, default: []].compactMap {
       guard case .failed(let message) = $0.outcome else {
         return nil

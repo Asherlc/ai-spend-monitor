@@ -388,13 +388,14 @@ public final class RefreshCoordinator {
     refreshedAt: Date
   ) -> RefreshSnapshot {
     var attempts = initialAttempts
-    var repositoryReadFailed = false
+    var spendRecordsReadFailed = false
+    var ancillaryReadFailed = false
     let records: [SpendRecord]
     do {
       records = try repository.records(in: window)
     } catch {
       records = []
-      repositoryReadFailed = true
+      spendRecordsReadFailed = true
       appendRepositoryFailure(
         "Unable to read cached spend",
         enabledProviders: enabledProviders,
@@ -429,7 +430,7 @@ public final class RefreshCoordinator {
       budgets = try repository.budgets()
     } catch {
       budgets = []
-      repositoryReadFailed = true
+      ancillaryReadFailed = true
       appendRepositoryFailure(
         "Unable to read budgets",
         enabledProviders: enabledProviders,
@@ -441,7 +442,7 @@ public final class RefreshCoordinator {
       actual: aggregated.actual,
       estimated: aggregated.estimated,
       providers: aggregated.providers,
-      isPartial: aggregated.isPartial || repositoryReadFailed
+      isPartial: aggregated.isPartial || spendRecordsReadFailed || ancillaryReadFailed
     )
     let providerAvailability = Dictionary(
       uniqueKeysWithValues: enabledProviders.map { provider in
@@ -449,7 +450,7 @@ public final class RefreshCoordinator {
         let hasCurrentWindowSuccess =
           states[provider]?.lastSuccessfulAt.map(window.contains) ?? false
         let availability: CurrentMonthDataAvailability =
-          !repositoryReadFailed && (hasRecords || hasCurrentWindowSuccess)
+          !spendRecordsReadFailed && (hasRecords || hasCurrentWindowSuccess)
           ? .available : .unavailable
         return (provider, availability)
       }
