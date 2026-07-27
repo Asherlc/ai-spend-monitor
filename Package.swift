@@ -25,6 +25,10 @@ let package = Package(
       dependencies: ["AISpendCore", "AISpendProviders"],
       resources: [.copy("Fixtures")]
     ),
+    .testTarget(
+      name: "AISpendBarTests",
+      dependencies: ["AISpendBar", "AISpendCore"]
+    ),
   ],
   swiftLanguageModes: [.v6]
 )

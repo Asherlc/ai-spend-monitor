@@ -2,12 +2,59 @@ import AISpendCore
 import Foundation
 import UserNotifications
 
+struct BudgetNotificationTransport: Sendable {
+  private let authorize: @MainActor @Sendable (UNAuthorizationOptions) async throws -> Bool
+  private let addRequest: @MainActor @Sendable (UNNotificationRequest) async throws -> Void
+
+  init(
+    requestAuthorization:
+      @escaping @MainActor @Sendable (UNAuthorizationOptions) async throws ->
+      Bool,
+    add:
+      @escaping @MainActor @Sendable (UNNotificationRequest) async throws ->
+      Void
+  ) {
+    authorize = requestAuthorization
+    addRequest = add
+  }
+
+  @MainActor
+  func requestAuthorization(
+    options: UNAuthorizationOptions
+  ) async throws -> Bool {
+    try await authorize(options)
+  }
+
+  @MainActor
+  func add(_ request: UNNotificationRequest) async throws {
+    try await addRequest(request)
+  }
+
+  @MainActor
+  static func live(
+    center: UNUserNotificationCenter = .current()
+  ) -> BudgetNotificationTransport {
+    BudgetNotificationTransport(
+      requestAuthorization: { options in
+        try await center.requestAuthorization(options: options)
+      },
+      add: { request in
+        try await center.add(request)
+      }
+    )
+  }
+}
+
 @MainActor
 final class BudgetNotificationClient {
-  private let center: UNUserNotificationCenter
+  private let transport: BudgetNotificationTransport
 
   init(center: UNUserNotificationCenter = .current()) {
-    self.center = center
+    transport = .live(center: center)
+  }
+
+  init(transport: BudgetNotificationTransport) {
+    self.transport = transport
   }
 
   @discardableResult
@@ -22,13 +69,11 @@ final class BudgetNotificationClient {
       return false
     }
 
-    return try await center.requestAuthorization(options: [.alert, .sound])
+    return try await transport.requestAuthorization(options: [.alert, .sound])
   }
 
   func deliver(
-    _ decision: BudgetAlertDecision,
-    now: Date,
-    calendar: Calendar
+    _ decision: BudgetAlertDecision
   ) async throws -> StoredBudgetAlertState {
     let content = UNMutableNotificationContent()
     content.title = decision.title
@@ -36,28 +81,17 @@ final class BudgetNotificationClient {
     content.sound = .default
 
     let request = UNNotificationRequest(
-      identifier: notificationIdentifier(
-        for: decision,
-        now: now,
-        calendar: calendar
-      ),
+      identifier: notificationIdentifier(for: decision),
       content: content,
       trigger: nil
     )
-    try await center.add(request)
+    try await transport.add(request)
     return decision.nextState
   }
 
   private func notificationIdentifier(
-    for decision: BudgetAlertDecision,
-    now: Date,
-    calendar: Calendar
+    for decision: BudgetAlertDecision
   ) -> String {
-    let components = calendar.dateComponents([.year, .month, .day], from: now)
-    let year = components.year ?? 0
-    let month = components.month ?? 0
-    let day = components.day ?? 0
-    let localDay = String(format: "%04d-%02d-%02d", year, month, day)
     let kind =
       switch decision.kind {
       case .immediate:
@@ -67,6 +101,6 @@ final class BudgetNotificationClient {
       }
     return
       "budget-\(decision.budgetID.uuidString.lowercased())-"
-      + "\(localDay)-\(kind)"
+      + "\(decision.localDay)-\(kind)"
   }
 }

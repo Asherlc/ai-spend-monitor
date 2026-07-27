@@ -10,6 +10,7 @@ public struct BudgetAlertDecision: Sendable {
   public let kind: BudgetAlertKind
   public let title: String
   public let body: String
+  public let localDay: String
   public let nextState: StoredBudgetAlertState
 
   public init(
@@ -17,12 +18,14 @@ public struct BudgetAlertDecision: Sendable {
     kind: BudgetAlertKind,
     title: String,
     body: String,
+    localDay: String,
     nextState: StoredBudgetAlertState
   ) {
     self.budgetID = budgetID
     self.kind = kind
     self.title = title
     self.body = body
+    self.localDay = localDay
     self.nextState = nextState
   }
 }
@@ -96,6 +99,15 @@ public struct BudgetAlertEngine: Sendable {
 
       switch evaluation.state {
       case .offPace:
+        if storedState.lastPacingState == nil
+          || storedState.lastPacingState == .unknown
+        {
+          var baselineState = storedState
+          baselineState.lastPacingState = .offPace
+          baselineState.lastReminderAt = now
+          stateUpdates.append(baselineState)
+          continue
+        }
         if let decision = alertDecision(
           budget: budget,
           pacing: pacing,
@@ -167,6 +179,7 @@ public struct BudgetAlertEngine: Sendable {
         projection: projection,
         budget: budget
       ),
+      localDay: Self.localDay(for: now, calendar: calendar),
       nextState: nextState
     )
   }
@@ -221,6 +234,19 @@ public struct BudgetAlertEngine: Sendable {
     [state.lastImmediateAlertAt, state.lastReminderAt]
       .compactMap { $0 }
       .contains { calendar.isDate($0, inSameDayAs: date) }
+  }
+
+  private static func localDay(
+    for date: Date,
+    calendar: Calendar
+  ) -> String {
+    let components = calendar.dateComponents([.year, .month, .day], from: date)
+    return String(
+      format: "%04d-%02d-%02d",
+      components.year ?? 0,
+      components.month ?? 0,
+      components.day ?? 0
+    )
   }
 
   private static func ordersBudgets(

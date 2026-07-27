@@ -31,6 +31,58 @@ final class BudgetAlertEngineTests: XCTestCase {
     XCTAssertTrue(result.stateUpdates.isEmpty)
   }
 
+  func testNilBaselineDoesNotNotifyAndDefersReminderUntilNextLocalDay() throws {
+    let budget = budget(limit: 500)
+    let baselineAt = localDate(2026, 7, 15, 10)
+    let baseline = evaluate(
+      budgetEvaluations: [evaluation(budget, state: .offPace)],
+      budgets: [budget],
+      storedStates: [:],
+      now: baselineAt
+    )
+
+    XCTAssertTrue(baseline.decisions.isEmpty)
+    let baselineState = try XCTUnwrap(baseline.stateUpdates.first)
+    XCTAssertEqual(baselineState.lastPacingState, .offPace)
+
+    let sameDay = evaluate(
+      budgetEvaluations: [evaluation(budget, state: .offPace)],
+      budgets: [budget],
+      storedStates: [budget.id: baselineState],
+      now: localDate(2026, 7, 15, 23)
+    )
+    let nextDay = evaluate(
+      budgetEvaluations: [evaluation(budget, state: .offPace)],
+      budgets: [budget],
+      storedStates: [budget.id: baselineState],
+      now: localDate(2026, 7, 16, 0, 1)
+    )
+
+    XCTAssertTrue(sameDay.decisions.isEmpty)
+    XCTAssertEqual(nextDay.decisions.map(\.kind), [.dailyReminder])
+  }
+
+  func testUnknownBaselineDoesNotCreateImmediateDecision() throws {
+    let budget = budget(limit: 500)
+    let result = evaluate(
+      budgetEvaluations: [evaluation(budget, state: .offPace)],
+      budgets: [budget],
+      storedStates: [
+        budget.id: StoredBudgetAlertState(
+          budgetID: budget.id,
+          lastPacingState: .unknown
+        )
+      ],
+      now: localDate(2026, 7, 15, 10)
+    )
+
+    XCTAssertTrue(result.decisions.isEmpty)
+    XCTAssertEqual(
+      try XCTUnwrap(result.stateUpdates.first).lastPacingState,
+      .offPace
+    )
+  }
+
   func testSecondEvaluationOnImmediateAlertDayCreatesNoDecision() {
     let budget = budget(limit: 500)
     let immediateAt = localDate(2026, 7, 15, 9)
@@ -262,6 +314,7 @@ final class BudgetAlertEngineTests: XCTestCase {
     XCTAssertTrue(body.contains("$500.00"))
     XCTAssertTrue(body.contains("Claude"))
     XCTAssertFalse(body.contains("Cursor"))
+    XCTAssertEqual(result.decisions.first?.localDay, "2026-07-15")
   }
 
   func testDecisionsConvenienceReturnsOnlyNotificationDecisions() {
