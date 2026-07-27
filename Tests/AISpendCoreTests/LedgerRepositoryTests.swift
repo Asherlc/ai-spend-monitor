@@ -384,6 +384,199 @@ final class LedgerRepositoryTests: XCTestCase {
     XCTAssertEqual(try repository.records(in: month), [stored])
   }
 
+  func testFailedProviderStateSaveRollsBackPriorState() throws {
+    let container = try makeContainer()
+    let prior = StoredProviderState(
+      provider: .claude,
+      isEnabled: true,
+      refreshStatus: .success
+    )
+    try SwiftDataLedgerRepository(modelContainer: container)
+      .saveProviderState(prior)
+    let repository = failingRepository(container: container)
+    let replacement = StoredProviderState(
+      provider: .claude,
+      isEnabled: false,
+      refreshStatus: .failed,
+      lastFailureMessage: "Unavailable"
+    )
+
+    XCTAssertThrowsError(try repository.saveProviderState(replacement))
+    XCTAssertEqual(try repository.providerStates(), [.claude: prior])
+  }
+
+  func testFailedBudgetAddRollsBackInsertedBudget() throws {
+    let container = try makeContainer()
+    let repository = failingRepository(container: container)
+
+    XCTAssertThrowsError(
+      try repository.addBudget(
+        limit: Money(100),
+        now: Date(timeIntervalSince1970: 1_704_067_200)
+      )
+    )
+    XCTAssertEqual(try repository.budgets(), [])
+  }
+
+  func testFailedBudgetUpdateRollsBackPriorBudget() throws {
+    let container = try makeContainer()
+    let seedingRepository = SwiftDataLedgerRepository(
+      modelContainer: container
+    )
+    let prior = try seedingRepository.addBudget(
+      limit: Money(100),
+      now: Date(timeIntervalSince1970: 1_704_067_200)
+    )
+    var replacement = prior
+    replacement.limit = Money(200)
+    replacement.isEnabled = false
+    let repository = failingRepository(container: container)
+
+    XCTAssertThrowsError(try repository.updateBudget(replacement))
+    XCTAssertEqual(try repository.budgets(), [prior])
+  }
+
+  func testFailedBudgetRemovalRollsBackBudgetAndAlertState() throws {
+    let container = try makeContainer()
+    let seedingRepository = SwiftDataLedgerRepository(
+      modelContainer: container
+    )
+    let prior = try seedingRepository.addBudget(
+      limit: Money(100),
+      now: Date(timeIntervalSince1970: 1_704_067_200)
+    )
+    let priorAlert = StoredBudgetAlertState(
+      budgetID: prior.id,
+      lastPacingState: .offPace
+    )
+    try seedingRepository.saveAlertState(priorAlert)
+    let repository = failingRepository(container: container)
+
+    XCTAssertThrowsError(try repository.removeBudget(id: prior.id))
+    XCTAssertEqual(try repository.budgets(), [prior])
+    XCTAssertEqual(try repository.alertState(for: prior.id), priorAlert)
+  }
+
+  func testFailedAlertStateSaveRollsBackPriorState() throws {
+    let container = try makeContainer()
+    let seedingRepository = SwiftDataLedgerRepository(
+      modelContainer: container
+    )
+    let budget = try seedingRepository.addBudget(
+      limit: Money(100),
+      now: Date(timeIntervalSince1970: 1_704_067_200)
+    )
+    let prior = StoredBudgetAlertState(
+      budgetID: budget.id,
+      lastPacingState: .onPace
+    )
+    try seedingRepository.saveAlertState(prior)
+    let replacement = StoredBudgetAlertState(
+      budgetID: budget.id,
+      lastPacingState: .offPace,
+      lastImmediateAlertAt: Date(timeIntervalSince1970: 1_704_067_300)
+    )
+    let repository = failingRepository(container: container)
+
+    XCTAssertThrowsError(try repository.saveAlertState(replacement))
+    XCTAssertEqual(try repository.alertState(for: budget.id), prior)
+  }
+
+  func testRemovedBudgetCannotRecreateOrphanAlertState() throws {
+    let container = try makeContainer()
+    let repository = SwiftDataLedgerRepository(modelContainer: container)
+    let budget = try repository.addBudget(
+      limit: Money(100),
+      now: Date(timeIntervalSince1970: 1_704_067_200)
+    )
+    let alert = StoredBudgetAlertState(
+      budgetID: budget.id,
+      lastPacingState: .offPace
+    )
+    try repository.saveAlertState(alert)
+    try repository.removeBudget(id: budget.id)
+
+    let inspectionContext = ModelContext(container)
+    XCTAssertEqual(
+      try inspectionContext.fetchCount(FetchDescriptor<BudgetEntity>()),
+      0
+    )
+    XCTAssertEqual(
+      try inspectionContext.fetchCount(
+        FetchDescriptor<BudgetAlertStateEntity>()
+      ),
+      0
+    )
+    XCTAssertThrowsError(try repository.saveAlertState(alert)) { error in
+      XCTAssertEqual(error as? LedgerError, .budgetNotFound)
+    }
+    XCTAssertEqual(
+      try inspectionContext.fetchCount(
+        FetchDescriptor<BudgetAlertStateEntity>()
+      ),
+      0
+    )
+  }
+
+  func testProviderFailureMessageIsSanitizedBeforePersistence() throws {
+    let container = try makeContainer()
+    let repository = SwiftDataLedgerRepository(modelContainer: container)
+    let secrets = [
+      "secret-bearer",
+      "session-cookie",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature",
+      "sk-ant-api03-secretvalue",
+      "admin-secret-value",
+      "person@example.com",
+      "acct_123456789",
+      "json-bearer-secret",
+      "json-cookie-secret",
+      "generic-api-secret",
+      "generic-admin-secret",
+      "generic-account-123",
+      "equals-bearer-secret",
+      "equals-cookie-secret",
+    ]
+    let rawDiagnostic = """
+      Authorization: Bearer secret-bearer
+      Cookie: session=session-cookie
+      jwt=\(secrets[2])
+      apiKey=\(secrets[3])
+      admin_key=\(secrets[4])
+      email=\(secrets[5])
+      account_id=\(secrets[6])
+      {"Authorization":"Bearer \(secrets[7])"}
+      {"Cookie":"session=\(secrets[8])"}
+      {"api_key":"\(secrets[9])"}
+      {"adminKey":"\(secrets[10])"}
+      {"account_id":"\(secrets[11])"}
+      Authorization=Bearer \(secrets[12])
+      Cookie=session=\(secrets[13])
+      """
+    let state = StoredProviderState(
+      provider: .claude,
+      isEnabled: true,
+      refreshStatus: .failed,
+      lastFailureMessage: rawDiagnostic
+    )
+
+    try repository.saveProviderState(state)
+
+    let inspectionContext = ModelContext(container)
+    let entity = try XCTUnwrap(
+      inspectionContext.fetch(FetchDescriptor<ProviderStateEntity>()).first
+    )
+    let persisted = try XCTUnwrap(entity.lastFailureMessage)
+    let roundTripped = try XCTUnwrap(
+      repository.providerStates()[.claude]?.lastFailureMessage
+    )
+    XCTAssertEqual(roundTripped, persisted)
+    XCTAssertTrue(persisted.contains("[REDACTED]"))
+    for secret in secrets {
+      XCTAssertFalse(persisted.contains(secret))
+    }
+  }
+
   func testBudgetCRUDAndAlertStateRoundTrip() throws {
     let repository = try makeRepository()
     let now = Date(timeIntervalSince1970: 1_704_067_200)
@@ -417,6 +610,15 @@ final class LedgerRepositoryTests: XCTestCase {
 
   private func makeRepository() throws -> SwiftDataLedgerRepository {
     try SwiftDataLedgerRepository(modelContainer: makeContainer())
+  }
+
+  private func failingRepository(
+    container: ModelContainer
+  ) -> SwiftDataLedgerRepository {
+    SwiftDataLedgerRepository(
+      modelContainer: container,
+      saveContext: { _ in throw TestSaveError.forced }
+    )
   }
 
   private func makeContainer() throws -> ModelContainer {

@@ -111,17 +111,13 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
       throw LedgerError.invalidRecord
     }
 
-    do {
+    try performMutation {
       for entity in existing {
         context.delete(entity)
       }
       for replacement in replacements {
         context.insert(replacement)
       }
-      try saveContext(context)
-    } catch {
-      context.rollback()
-      throw error
     }
   }
 
@@ -151,28 +147,33 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
 
   public func saveProviderState(_ state: StoredProviderState) throws {
     let providerRawValue = state.provider.rawValue
+    let sanitizedFailureMessage = state.lastFailureMessage.map(
+      sanitizeDiagnostic
+    )
     let descriptor = FetchDescriptor<ProviderStateEntity>(
       predicate: #Predicate { $0.providerRawValue == providerRawValue }
     )
-    if let entity = try context.fetch(descriptor).first {
-      entity.isEnabled = state.isEnabled
-      entity.lastAttemptAt = state.lastAttemptAt
-      entity.lastSuccessfulAt = state.lastSuccessfulAt
-      entity.refreshStatusRawValue = state.refreshStatus.rawValue
-      entity.lastFailureMessage = state.lastFailureMessage
-    } else {
-      context.insert(
-        ProviderStateEntity(
-          providerRawValue: providerRawValue,
-          isEnabled: state.isEnabled,
-          lastAttemptAt: state.lastAttemptAt,
-          lastSuccessfulAt: state.lastSuccessfulAt,
-          refreshStatusRawValue: state.refreshStatus.rawValue,
-          lastFailureMessage: state.lastFailureMessage
+    let entity = try context.fetch(descriptor).first
+    try performMutation {
+      if let entity {
+        entity.isEnabled = state.isEnabled
+        entity.lastAttemptAt = state.lastAttemptAt
+        entity.lastSuccessfulAt = state.lastSuccessfulAt
+        entity.refreshStatusRawValue = state.refreshStatus.rawValue
+        entity.lastFailureMessage = sanitizedFailureMessage
+      } else {
+        context.insert(
+          ProviderStateEntity(
+            providerRawValue: providerRawValue,
+            isEnabled: state.isEnabled,
+            lastAttemptAt: state.lastAttemptAt,
+            lastSuccessfulAt: state.lastSuccessfulAt,
+            refreshStatusRawValue: state.refreshStatus.rawValue,
+            lastFailureMessage: sanitizedFailureMessage
+          )
         )
-      )
+      }
     }
-    try context.save()
   }
 
   public func budgets() throws -> [BudgetDefinition] {
@@ -198,8 +199,9 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
       isEnabled: true,
       createdAt: now
     )
-    context.insert(encodeBudget(budget))
-    try context.save()
+    try performMutation {
+      context.insert(encodeBudget(budget))
+    }
     return budget
   }
 
@@ -213,11 +215,12 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
     guard let entity = try context.fetch(descriptor).first else {
       throw LedgerError.budgetNotFound
     }
-    entity.amountString = canonicalDecimalString(budget.limit.amount)
-    entity.currency = budget.limit.currency
-    entity.isEnabled = budget.isEnabled
-    entity.createdAt = budget.createdAt
-    try context.save()
+    try performMutation {
+      entity.amountString = canonicalDecimalString(budget.limit.amount)
+      entity.currency = budget.limit.currency
+      entity.isEnabled = budget.isEnabled
+      entity.createdAt = budget.createdAt
+    }
   }
 
   public func removeBudget(id: UUID) throws {
@@ -228,15 +231,15 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
     guard let budget = try context.fetch(budgetDescriptor).first else {
       throw LedgerError.budgetNotFound
     }
-    context.delete(budget)
-
-    let alertDescriptor = FetchDescriptor<BudgetAlertStateEntity>(
-      predicate: #Predicate { $0.budgetID == budgetID }
-    )
-    for alert in try context.fetch(alertDescriptor) {
-      context.delete(alert)
+    try performMutation {
+      context.delete(budget)
+      let alertDescriptor = FetchDescriptor<BudgetAlertStateEntity>(
+        predicate: #Predicate { $0.budgetID == budgetID }
+      )
+      for alert in try context.fetch(alertDescriptor) {
+        context.delete(alert)
+      }
     }
-    try context.save()
   }
 
   public func alertState(
@@ -269,24 +272,87 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
 
   public func saveAlertState(_ state: StoredBudgetAlertState) throws {
     let budgetID = state.budgetID
+    let budgetDescriptor = FetchDescriptor<BudgetEntity>(
+      predicate: #Predicate { $0.budgetID == budgetID }
+    )
+    guard try context.fetch(budgetDescriptor).first != nil else {
+      throw LedgerError.budgetNotFound
+    }
     let descriptor = FetchDescriptor<BudgetAlertStateEntity>(
       predicate: #Predicate { $0.budgetID == budgetID }
     )
-    if let entity = try context.fetch(descriptor).first {
-      entity.lastPacingStateRawValue = state.lastPacingState?.rawValue
-      entity.lastImmediateAlertAt = state.lastImmediateAlertAt
-      entity.lastReminderAt = state.lastReminderAt
-    } else {
-      context.insert(
-        BudgetAlertStateEntity(
-          budgetID: state.budgetID,
-          lastPacingStateRawValue: state.lastPacingState?.rawValue,
-          lastImmediateAlertAt: state.lastImmediateAlertAt,
-          lastReminderAt: state.lastReminderAt
+    let entity = try context.fetch(descriptor).first
+    try performMutation {
+      if let entity {
+        entity.lastPacingStateRawValue = state.lastPacingState?.rawValue
+        entity.lastImmediateAlertAt = state.lastImmediateAlertAt
+        entity.lastReminderAt = state.lastReminderAt
+      } else {
+        context.insert(
+          BudgetAlertStateEntity(
+            budgetID: state.budgetID,
+            lastPacingStateRawValue: state.lastPacingState?.rawValue,
+            lastImmediateAlertAt: state.lastImmediateAlertAt,
+            lastReminderAt: state.lastReminderAt
+          )
         )
+      }
+    }
+  }
+
+  private func performMutation(_ mutation: () throws -> Void) throws {
+    do {
+      try mutation()
+      try saveContext(context)
+    } catch {
+      context.rollback()
+      throw error
+    }
+  }
+
+  private func sanitizeDiagnostic(_ diagnostic: String) -> String {
+    let patterns = [
+      (
+        #"(?i)(["']?authorization["']?\s*[:=]\s*["']?)[^"'\r\n,}]+"#,
+        "$1[REDACTED]"
+      ),
+      (
+        #"(?i)(["']?cookie["']?\s*[:=]\s*["']?)[^"'\r\n,}]+"#,
+        "$1[REDACTED]"
+      ),
+      (
+        #"(?i)(["']?(?:api[_-]?key|admin[_-]?key)["']?\s*[:=]\s*["']?)[^"'\s\r\n,}]+"#,
+        "$1[REDACTED]"
+      ),
+      (
+        #"(?i)(["']?account[_ -]?id["']?\s*[:=]\s*["']?)[^"'\s\r\n,}]+"#,
+        "$1[REDACTED]"
+      ),
+      (
+        #"\beyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"#,
+        "[REDACTED]"
+      ),
+      (
+        #"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{8,}\b"#,
+        "[REDACTED]"
+      ),
+      (
+        #"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#,
+        "[REDACTED]"
+      ),
+      (
+        #"\bacct_[A-Za-z0-9_-]+\b"#,
+        "[REDACTED]"
+      ),
+    ]
+
+    return patterns.reduce(diagnostic) { redacted, pattern in
+      redacted.replacingOccurrences(
+        of: pattern.0,
+        with: pattern.1,
+        options: [.regularExpression, .caseInsensitive]
       )
     }
-    try context.save()
   }
 
   private func encodeRecord(
