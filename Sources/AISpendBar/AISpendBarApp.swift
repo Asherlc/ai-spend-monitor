@@ -162,7 +162,10 @@ private final class BootstrapRecovery {
       refreshedAt: now,
       monthWindow: window,
       providerStates: states,
-      hasCurrentMonthData: false
+      dataAvailability: .unavailable,
+      providerAvailability: Dictionary(
+        uniqueKeysWithValues: ProviderID.allCases.map { ($0, .unavailable) }
+      )
     )
     return snapshot
   }

@@ -92,13 +92,37 @@ final class AppModelTests: XCTestCase {
       providerStates: [
         .openAI: StoredProviderState(provider: .openAI, isEnabled: true)
       ],
-      hasCurrentMonthData: false
+      dataAvailability: .unavailable
     )
     let model = AppModel(snapshot: noData, refresh: { _ in noData })
 
     XCTAssertEqual(model.availability, .unavailable)
     XCTAssertEqual(model.statusTitle, "No data")
     XCTAssertEqual(model.headlineTitle, "No current data")
+    XCTAssertEqual(model.providerRows.first?.amountTitle, "No data")
+  }
+
+  func testSuccessfulEmptyProviderRendersMeasuredZero() {
+    let knownZero = Self.snapshot(
+      total: 0,
+      providers: [],
+      providerStates: [
+        .openAI: StoredProviderState(
+          provider: .openAI,
+          isEnabled: true,
+          lastSuccessfulAt: Date(timeIntervalSince1970: 100),
+          refreshStatus: .success
+        )
+      ],
+      dataAvailability: .available,
+      providerAvailability: [.openAI: .available]
+    )
+    let model = AppModel(snapshot: knownZero, refresh: { _ in knownZero })
+
+    XCTAssertEqual(model.availability, .available)
+    XCTAssertEqual(model.statusTitle, "$0.00")
+    XCTAssertEqual(model.headlineTitle, "$0.00")
+    XCTAssertEqual(model.providerRows.first?.amountTitle, "$0.00")
   }
 
   func testProviderRowsIncludeEnabledProviderWithoutCachedSpend() {
@@ -251,7 +275,8 @@ final class AppModelTests: XCTestCase {
     budgets: [BudgetDefinition] = [],
     providerStates: [ProviderID: StoredProviderState] = [:],
     attempts: [ProviderID: [SourceAttempt]] = [:],
-    hasCurrentMonthData: Bool? = nil,
+    dataAvailability: CurrentMonthDataAvailability? = nil,
+    providerAvailability: [ProviderID: CurrentMonthDataAvailability] = [:],
     monthWindow: MonthWindow? = nil,
     refreshedAt: Date = Date(timeIntervalSince1970: 100),
     evaluatedAt: Date? = nil
@@ -284,7 +309,8 @@ final class AppModelTests: XCTestCase {
       evaluatedAt: evaluatedAt,
       monthWindow: window,
       providerStates: providerStates,
-      hasCurrentMonthData: hasCurrentMonthData ?? !providers.isEmpty
+      dataAvailability: dataAvailability,
+      providerAvailability: providerAvailability
     )
   }
 

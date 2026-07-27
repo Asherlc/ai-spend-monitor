@@ -55,19 +55,30 @@ public struct ProviderDetailView: View {
 
   private var spendSummary: some View {
     VStack(alignment: .leading, spacing: 5) {
-      Text(SpendFormatting.currency(provider.total))
+      Text(presentation.amountTitle)
         .font(.title.bold().monospacedDigit())
-      Text(
-        "\(SpendFormatting.share(model.providerShare(provider))) of combined spend"
-      )
-      .font(.caption)
-      .foregroundStyle(.secondary)
-      Text(
-        "\(SpendFormatting.currency(provider.actual)) actual · "
-          + "\(SpendFormatting.estimated(provider.estimated)) estimated"
-      )
-      .font(.caption)
-      .foregroundStyle(.secondary)
+        .accessibilityLabel(
+          presentation.availability == .available
+            ? "\(provider.id.displayName) spend \(presentation.amountTitle)"
+            : "\(provider.id.displayName), no current spend data"
+        )
+      if presentation.availability == .available {
+        Text(
+          "\(SpendFormatting.share(model.providerShare(provider))) of combined spend"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        Text(
+          "\(SpendFormatting.currency(provider.actual)) actual · "
+            + "\(SpendFormatting.estimated(provider.estimated)) estimated"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      } else {
+        Text("No successful source coverage for this calendar month.")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
     }
   }
 

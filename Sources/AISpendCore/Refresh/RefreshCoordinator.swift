@@ -8,6 +8,11 @@ public enum RefreshReason: Hashable, Sendable {
   case providerEnabled(ProviderID)
 }
 
+public enum CurrentMonthDataAvailability: String, Hashable, Sendable {
+  case available
+  case unavailable
+}
+
 public struct RefreshSnapshot: Sendable {
   public let summary: MonthlySummary
   public let pacing: PacingResult
@@ -17,7 +22,8 @@ public struct RefreshSnapshot: Sendable {
   public let evaluatedAt: Date
   public let monthWindow: MonthWindow
   public let providerStates: [ProviderID: StoredProviderState]
-  public let hasCurrentMonthData: Bool
+  public let dataAvailability: CurrentMonthDataAvailability
+  public let providerAvailability: [ProviderID: CurrentMonthDataAvailability]
 
   public init(
     summary: MonthlySummary,
@@ -28,7 +34,8 @@ public struct RefreshSnapshot: Sendable {
     evaluatedAt: Date? = nil,
     monthWindow: MonthWindow? = nil,
     providerStates: [ProviderID: StoredProviderState] = [:],
-    hasCurrentMonthData: Bool? = nil
+    dataAvailability: CurrentMonthDataAvailability? = nil,
+    providerAvailability: [ProviderID: CurrentMonthDataAvailability] = [:]
   ) {
     self.summary = summary
     self.pacing = pacing
@@ -41,7 +48,17 @@ public struct RefreshSnapshot: Sendable {
       ?? (try? MonthWindow.current(containing: refreshedAt, calendar: .current))
       ?? MonthWindow(start: refreshedAt, end: refreshedAt.addingTimeInterval(1))
     self.providerStates = providerStates
-    self.hasCurrentMonthData = hasCurrentMonthData ?? !summary.providers.isEmpty
+    let resolvedAvailability =
+      dataAvailability
+      ?? (!summary.providers.isEmpty ? .available : .unavailable)
+    self.dataAvailability = resolvedAvailability
+    if providerAvailability.isEmpty {
+      self.providerAvailability = Dictionary(
+        uniqueKeysWithValues: summary.providers.map { ($0.id, .available) }
+      )
+    } else {
+      self.providerAvailability = providerAvailability
+    }
   }
 }
 
@@ -426,12 +443,26 @@ public final class RefreshCoordinator {
       providers: aggregated.providers,
       isPartial: aggregated.isPartial || repositoryReadFailed
     )
+    let providerAvailability = Dictionary(
+      uniqueKeysWithValues: enabledProviders.map { provider in
+        let hasRecords = reconciled.contains { $0.provider == provider }
+        let hasCurrentWindowSuccess =
+          states[provider]?.lastSuccessfulAt.map(window.contains) ?? false
+        let availability: CurrentMonthDataAvailability =
+          !repositoryReadFailed && (hasRecords || hasCurrentWindowSuccess)
+          ? .available : .unavailable
+        return (provider, availability)
+      }
+    )
+    let dataAvailability: CurrentMonthDataAvailability =
+      providerAvailability.values.contains(.available)
+      ? .available : .unavailable
     let pacing = pacingEngine.evaluate(
       spend: summary.total,
       budgets: budgets,
       now: clock.now,
       window: window,
-      hasAnyData: !reconciled.isEmpty,
+      hasAnyData: dataAvailability == .available,
       allDataIsStale: allDataIsStale,
       isPartial: summary.isPartial
     )
@@ -444,7 +475,8 @@ public final class RefreshCoordinator {
       evaluatedAt: clock.now,
       monthWindow: window,
       providerStates: states,
-      hasCurrentMonthData: !reconciled.isEmpty
+      dataAvailability: dataAvailability,
+      providerAvailability: providerAvailability
     )
   }
 
@@ -496,7 +528,8 @@ public final class RefreshCoordinator {
       evaluatedAt: now,
       monthWindow: window,
       providerStates: [:],
-      hasCurrentMonthData: false
+      dataAvailability: .unavailable,
+      providerAvailability: [:]
     )
   }
 
@@ -543,7 +576,10 @@ public final class RefreshCoordinator {
       evaluatedAt: now,
       monthWindow: fallback.monthWindow,
       providerStates: states,
-      hasCurrentMonthData: false
+      dataAvailability: .unavailable,
+      providerAvailability: Dictionary(
+        uniqueKeysWithValues: providers.map { ($0, .unavailable) }
+      )
     )
   }
 

@@ -188,6 +188,8 @@ final class RefreshCoordinatorTests: XCTestCase {
 
     XCTAssertEqual(snapshot.refreshedAt, previousMonthAttempt)
     XCTAssertEqual(snapshot.monthWindow, month)
+    XCTAssertEqual(snapshot.dataAvailability, .unavailable)
+    XCTAssertEqual(snapshot.providerAvailability[.claude], .unavailable)
   }
 
   func testFreshnessGuardOnlyAppliesToPopoverReason() async throws {
@@ -245,6 +247,7 @@ final class RefreshCoordinatorTests: XCTestCase {
   func testSuccessfulEmptySourceClearsItsCachedInterval() async throws {
     let repository = try makeRepository()
     try enable([.openAI], in: repository)
+    _ = try repository.addBudget(limit: Money(100), now: now)
     let cached = try record(
       id: "cached-openai",
       provider: .openAI,
@@ -277,9 +280,13 @@ final class RefreshCoordinatorTests: XCTestCase {
       repository: repository
     )
 
-    _ = await coordinator.refresh(reason: .manual)
+    let snapshot = await coordinator.refresh(reason: .manual)
 
     XCTAssertTrue(try repository.records(in: month).isEmpty)
+    XCTAssertEqual(snapshot.dataAvailability, .available)
+    XCTAssertEqual(snapshot.providerAvailability[.openAI], .available)
+    XCTAssertEqual(snapshot.pacing.projection, .zero)
+    XCTAssertEqual(snapshot.pacing.budgets.first?.state, .onPace)
   }
 
   func testPersistsRawSourceRecordsAndReconcilesOnlyDerivedSnapshot() async throws {

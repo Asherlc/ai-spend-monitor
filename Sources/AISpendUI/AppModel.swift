@@ -37,8 +37,15 @@ public struct ProviderPresentation: Identifiable, Hashable, Sendable {
   public let summary: ProviderSpendSummary
   public let status: ProviderStatus
   public let attempts: [SourceAttempt]
+  public let availability: CurrentMonthDataAvailability
 
   public var id: ProviderID { summary.id }
+
+  public var amountTitle: String {
+    availability == .available
+      ? SpendFormatting.currency(summary.total)
+      : "No data"
+  }
 }
 
 @MainActor
@@ -113,7 +120,7 @@ public final class AppModel {
   }
 
   public var availability: SpendAvailability {
-    guard snapshot.hasCurrentMonthData else { return .unavailable }
+    guard snapshot.dataAvailability == .available else { return .unavailable }
     return snapshot.pacing.isCollecting ? .collecting : .available
   }
 
@@ -162,13 +169,16 @@ public final class AppModel {
       )
     }
     return enabledProviders.map { provider in
-      ProviderPresentation(
-        summary: summaries[provider] ?? Self.emptySummary(provider: provider),
+      let summary = summaries[provider] ?? Self.emptySummary(provider: provider)
+      return ProviderPresentation(
+        summary: summary,
         status: providerStatus(
           state: snapshot.providerStates[provider],
           attempts: snapshot.attempts[provider] ?? []
         ),
-        attempts: snapshot.attempts[provider] ?? []
+        attempts: snapshot.attempts[provider] ?? [],
+        availability: snapshot.providerAvailability[provider]
+          ?? (summaries[provider] == nil ? .unavailable : .available)
       )
     }.sorted {
       if $0.summary.total != $1.summary.total {

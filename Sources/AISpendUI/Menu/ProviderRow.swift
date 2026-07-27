@@ -32,15 +32,15 @@ public struct ProviderRow: View {
         }
         Spacer()
         VStack(alignment: .trailing, spacing: 2) {
-          if provider.total.amount > 0 {
-            Text(SpendFormatting.currency(provider.total))
+          if presentation.availability == .available {
+            Text(presentation.amountTitle)
               .font(.callout.monospacedDigit().weight(.medium))
           } else {
-            Text("No data")
+            Text(presentation.amountTitle)
               .font(.callout)
               .foregroundStyle(.secondary)
           }
-          if provider.estimated.amount > 0 {
+          if presentation.availability == .available && provider.estimated.amount > 0 {
             Text("\(SpendFormatting.estimated(provider.estimated)) estimated")
               .font(.caption2)
               .foregroundStyle(.secondary)
@@ -54,9 +54,17 @@ public struct ProviderRow: View {
     }
     .buttonStyle(.plain)
     .accessibilityLabel(
-      "\(provider.id.displayName), \(SpendFormatting.currency(provider.total)), \(share)"
+      accessibilityLabel
     )
     .help("Show \(provider.id.displayName) model and source details")
+  }
+
+  private var accessibilityLabel: String {
+    let provider = presentation.summary
+    guard presentation.availability == .available else {
+      return "\(provider.id.displayName), no current data, \(statusLine)"
+    }
+    return "\(provider.id.displayName), \(presentation.amountTitle), \(share)"
   }
 
   private var share: String {
