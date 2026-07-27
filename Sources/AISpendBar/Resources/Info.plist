@@ -4,8 +4,10 @@
 <dict>
   <key>CFBundleDisplayName</key>
   <string>AI Spend</string>
-  <key>CFBundleIdentifier</key>
-  <string>com.aispend.bar</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.ashercohen.AISpendBar</string>
+	<key>CFBundleExecutable</key>
+	<string>AISpendBar</string>
   <key>CFBundleName</key>
   <string>AI Spend</string>
   <key>CFBundlePackageType</key>

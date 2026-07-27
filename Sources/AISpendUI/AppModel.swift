@@ -192,6 +192,10 @@ public final class AppModel {
     await performRefresh(reason: .launch)
   }
 
+  public func periodicRefresh() async {
+    await performRefresh(reason: .periodic)
+  }
+
   public func popoverOpened() async {
     await performRefresh(reason: .popover)
   }

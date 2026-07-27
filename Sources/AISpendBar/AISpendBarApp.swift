@@ -1,15 +1,21 @@
 import AISpendCore
 import AISpendProviders
 import AISpendUI
+import AppKit
 import SwiftData
 import SwiftUI
 
 @main
 struct AISpendBarApp: App {
   @State private var model: AppModel
+  private let lifecycle: AppLifecycleController
 
   init() {
-    _model = State(initialValue: AppEnvironment.makeModel())
+    let model = AppEnvironment.makeModel()
+    _model = State(initialValue: model)
+    let lifecycle = AppLifecycleController(model: model)
+    self.lifecycle = lifecycle
+    lifecycle.start()
   }
 
   var body: some Scene {
@@ -23,6 +29,91 @@ struct AISpendBarApp: App {
     Settings {
       SettingsView(model: model)
     }
+  }
+}
+
+@MainActor
+final class AppLifecycleController: NSObject {
+  typealias RefreshAction =
+    @MainActor @Sendable (RefreshReason) async -> Void
+  typealias SleepAction =
+    @Sendable (Duration) async throws -> Void
+
+  private let interval: Duration
+  private let refresh: RefreshAction
+  private let sleep: SleepAction
+  private var loopTask: Task<Void, Never>?
+  private var generation = 0
+
+  var isRunning: Bool { loopTask != nil }
+
+  init(
+    interval: Duration = .seconds(15 * 60),
+    refresh: @escaping RefreshAction,
+    sleep: @escaping SleepAction = {
+      try await ContinuousClock().sleep(for: $0)
+    }
+  ) {
+    self.interval = interval
+    self.refresh = refresh
+    self.sleep = sleep
+    super.init()
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(applicationWillTerminate),
+      name: NSApplication.willTerminateNotification,
+      object: nil
+    )
+  }
+
+  convenience init(model: AppModel) {
+    self.init { [weak model] reason in
+      switch reason {
+      case .launch:
+        await model?.launch()
+      case .periodic:
+        await model?.periodicRefresh()
+      case .popover, .manual, .providerEnabled:
+        break
+      }
+    }
+  }
+
+  func start() {
+    guard loopTask == nil else { return }
+    generation += 1
+    let activeGeneration = generation
+    let interval = interval
+    let refresh = refresh
+    let sleep = sleep
+    loopTask = Task { [weak self] in
+      await refresh(.launch)
+      while !Task.isCancelled {
+        do {
+          try await sleep(interval)
+        } catch {
+          break
+        }
+        guard !Task.isCancelled else { break }
+        await refresh(.periodic)
+      }
+      self?.finish(generation: activeGeneration)
+    }
+  }
+
+  func stop() {
+    generation += 1
+    loopTask?.cancel()
+    loopTask = nil
+  }
+
+  @objc private func applicationWillTerminate() {
+    stop()
+  }
+
+  private func finish(generation completedGeneration: Int) {
+    guard generation == completedGeneration else { return }
+    loopTask = nil
   }
 }
 
@@ -52,7 +143,6 @@ private enum AppEnvironment {
       ),
       storageURL: recovery.storageURL
     )
-    Task { await model.launch() }
     return model
   }
 

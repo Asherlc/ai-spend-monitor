@@ -15,7 +15,7 @@ public struct PriceCatalog: Sendable {
   private let models: [String: ModelPrice]
 
   public static func bundled() throws -> PriceCatalog {
-    guard let url = Bundle.module.url(forResource: "model-prices", withExtension: "json") else {
+    guard let url = bundledResourceURL() else {
       throw PriceCatalogError.resourceUnavailable
     }
     do {
@@ -36,6 +36,21 @@ public struct PriceCatalog: Sendable {
     } catch {
       throw PriceCatalogError.invalidCatalog
     }
+  }
+
+  private static func bundledResourceURL() -> URL? {
+    let packagedBundleURL = Bundle.main.resourceURL?
+      .appendingPathComponent("AISpendBar_AISpendProviders.bundle")
+    if let packagedBundleURL,
+      let packagedBundle = Bundle(url: packagedBundleURL),
+      let resourceURL = packagedBundle.url(
+        forResource: "model-prices",
+        withExtension: "json"
+      )
+    {
+      return resourceURL
+    }
+    return Bundle.module.url(forResource: "model-prices", withExtension: "json")
   }
 
   public func estimate(_ usage: LocalUsage) throws -> Money {
