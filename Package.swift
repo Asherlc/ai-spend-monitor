@@ -17,6 +17,7 @@ let package = Package(
     .executableTarget(
       name: "AISpendBar",
       dependencies: ["AISpendCore", "AISpendProviders", "AISpendUI"],
+      exclude: ["Resources/Info.plist"],
       resources: [.process("Resources")]
     ),
     .testTarget(name: "AISpendCoreTests", dependencies: ["AISpendCore"]),
@@ -28,6 +29,10 @@ let package = Package(
     .testTarget(
       name: "AISpendBarTests",
       dependencies: ["AISpendBar", "AISpendCore"]
+    ),
+    .testTarget(
+      name: "AISpendUITests",
+      dependencies: ["AISpendCore", "AISpendProviders", "AISpendUI"]
     ),
   ],
   swiftLanguageModes: [.v6]
