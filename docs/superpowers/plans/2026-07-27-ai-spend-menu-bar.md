@@ -110,9 +110,6 @@
 - Create: `Sources/AISpendCore/Clock.swift`
 - Create: `Tests/AISpendCoreTests/MoneyTests.swift`
 - Create: `Tests/AISpendCoreTests/DomainTests.swift`
-- Create: `Tests/AISpendProvidersTests/AISpendProvidersBootstrapTests.swift`
-- Create: `Tests/AISpendProvidersTests/Fixtures/README.txt`
-- Create: `Tests/AISpendUITests/AISpendUIBootstrapTests.swift`
 
 **Interfaces:**
 - Produces: `Money`, `ProviderID`, `SpendQuality`, `SpendRecord`, `BudgetDefinition`, `BudgetPacingState`, `MonthlySummary`, `Clock`.
@@ -181,11 +178,6 @@ let package = Package(
                           dependencies: ["AISpendCore", "AISpendProviders", "AISpendUI"],
                           resources: [.process("Resources")]),
         .testTarget(name: "AISpendCoreTests", dependencies: ["AISpendCore"]),
-        .testTarget(name: "AISpendProvidersTests",
-                    dependencies: ["AISpendCore", "AISpendProviders"],
-                    resources: [.copy("Fixtures")]),
-        .testTarget(name: "AISpendUITests",
-                    dependencies: ["AISpendCore", "AISpendProviders", "AISpendUI"]),
     ],
     swiftLanguageModes: [.v6]
 )
@@ -207,23 +199,7 @@ enum AISpendBarBootstrap {
 }
 ```
 
-Add one empty XCTest case to each bootstrap test target. Add resource `README.txt` files explaining that the app metadata, price catalog, and sanitized fixtures are added by later tasks.
-
-```swift
-import XCTest
-
-final class AISpendProvidersBootstrapTests: XCTestCase {
-    func testBootstrap() {
-        XCTAssertTrue(true)
-    }
-}
-
-final class AISpendUIBootstrapTests: XCTestCase {
-    func testBootstrap() {
-        XCTAssertTrue(true)
-    }
-}
-```
+Add resource `README.txt` files explaining that the app metadata and price catalog are added by later tasks. Do not create empty test targets or tests that assert constants; Tasks 5 and 10 add the provider and UI test targets alongside their first behavioral tests.
 
 Implement these declarations:
 
@@ -603,6 +579,7 @@ rtk git commit -m "feat: persist spend and budgets"
 ### Task 5: Build Read-Only Source Hosts and Redacted Diagnostics
 
 **Files:**
+- Modify: `Package.swift`
 - Create: `Sources/AISpendCore/Providers/ProviderAdapter.swift`
 - Create: `Sources/AISpendProviders/Hosting/CredentialHost.swift`
 - Create: `Sources/AISpendProviders/Hosting/CursorStateReader.swift`
@@ -619,6 +596,16 @@ rtk git commit -m "feat: persist spend and budgets"
 - Consumes: `AISpendCore`, Foundation, Security, SQLite3.
 
 - [ ] **Step 1: Write failing security-boundary tests**
+
+Add the provider test target to `Package.swift` before writing the tests:
+
+```swift
+.testTarget(
+    name: "AISpendProvidersTests",
+    dependencies: ["AISpendCore", "AISpendProviders"],
+    resources: [.copy("Fixtures")]
+),
+```
 
 Assert that:
 
@@ -1048,6 +1035,7 @@ rtk git commit -m "feat: alert on off-pace budgets"
 ### Task 10: Build the Menu Bar Popover and Provider Drill-Down
 
 **Files:**
+- Modify: `Package.swift`
 - Create: `Sources/AISpendUI/SpendFormatting.swift`
 - Create: `Sources/AISpendUI/Menu/SpendPopoverView.swift`
 - Create: `Sources/AISpendUI/Menu/BudgetPaceRow.swift`
@@ -1065,6 +1053,15 @@ rtk git commit -m "feat: alert on off-pace budgets"
 - Produces: dynamic `MenuBarExtra`, popover navigation, refresh and settings controls.
 
 - [ ] **Step 1: Write failing formatting and model tests**
+
+Add the UI test target to `Package.swift` before writing the tests:
+
+```swift
+.testTarget(
+    name: "AISpendUITests",
+    dependencies: ["AISpendCore", "AISpendProviders", "AISpendUI"]
+),
+```
 
 Assert:
 
