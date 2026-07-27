@@ -388,7 +388,6 @@ private final class BootstrapRecovery {
     )
     let alerts = BudgetAlertRuntime(
       repository: repository,
-      calendarProvider: calendarProvider,
       deliver: { [notifications] decision in
         try await notifications.deliver(decision)
       }

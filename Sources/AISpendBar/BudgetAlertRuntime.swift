@@ -9,7 +9,6 @@ final class BudgetAlertRuntime {
 
   private let repository: any LedgerRepository
   private let engine: BudgetAlertEngine
-  private let calendarProvider: @Sendable () -> Calendar
   private let deliver: Delivery
   private let sanitizer: DiagnosticSanitizer
   private var isProcessing = false
@@ -18,14 +17,10 @@ final class BudgetAlertRuntime {
   init(
     repository: any LedgerRepository,
     engine: BudgetAlertEngine = BudgetAlertEngine(),
-    calendarProvider: @escaping @Sendable () -> Calendar = {
-      .autoupdatingCurrent
-    },
     deliver: @escaping Delivery
   ) {
     self.repository = repository
     self.engine = engine
-    self.calendarProvider = calendarProvider
     self.deliver = deliver
     sanitizer = DiagnosticSanitizer()
   }
@@ -49,7 +44,7 @@ final class BudgetAlertRuntime {
         budgets: budgets,
         storedStates: states,
         now: snapshot.evaluatedAt,
-        calendar: calendarProvider(),
+        calendar: snapshot.evaluationCalendar,
         allDataIsStale: snapshot.allDataIsStale
       )
 
@@ -134,6 +129,7 @@ final class BudgetAlertRuntime {
       refreshedAt: snapshot.refreshedAt,
       evaluatedAt: snapshot.evaluatedAt,
       monthWindow: snapshot.monthWindow,
+      evaluationCalendar: snapshot.evaluationCalendar,
       providerStates: snapshot.providerStates,
       dataAvailability: snapshot.dataAvailability,
       providerAvailability: snapshot.providerAvailability

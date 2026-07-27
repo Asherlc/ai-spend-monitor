@@ -295,6 +295,79 @@ final class RefreshCoordinatorTests: XCTestCase {
     )
   }
 
+  func testCalendarMonthSwitchDuringFetchRetriesOnceAndReturnsNewWindow() async throws {
+    let instant = Date(timeIntervalSince1970: 1_722_474_000)  // 2024-08-01 01:00 UTC
+    let clock = MutableClock(now: instant)
+    let calendarBox = MutableCalendar(calendar: utcCalendar)
+    let repository = try makeRepository()
+    try enable([.claude], in: repository)
+    let adapter = CalendarSwitchingAdapter(provider: .claude, fetchedAt: instant)
+    let coordinator = RefreshCoordinator(
+      adapters: [adapter],
+      repository: repository,
+      clock: clock,
+      calendarProvider: calendarBox.current
+    )
+    let refresh = Task {
+      await coordinator.refresh(reason: .manual)
+    }
+    await adapter.waitUntilFirstFetchStarted()
+    var losAngeles = Calendar(identifier: .gregorian)
+    losAngeles.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    calendarBox.calendar = losAngeles
+    await adapter.releaseFirstFetch()
+
+    let snapshot = await refresh.value
+    let windows = await adapter.fetchedWindows
+    let expectedWindow = try MonthWindow.current(
+      containing: instant,
+      calendar: losAngeles
+    )
+
+    XCTAssertEqual(windows.count, 2)
+    XCTAssertNotEqual(windows[0], windows[1])
+    XCTAssertEqual(windows[1], expectedWindow)
+    XCTAssertEqual(snapshot.monthWindow, expectedWindow)
+    XCTAssertEqual(
+      snapshot.evaluationCalendar.timeZone.identifier,
+      losAngeles.timeZone.identifier
+    )
+  }
+
+  func testRepeatedCalendarChangesAreBoundedToOneRetry() async throws {
+    let instant = Date(timeIntervalSince1970: 1_722_474_000)
+    var losAngeles = Calendar(identifier: .gregorian)
+    losAngeles.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    var tokyo = Calendar(identifier: .gregorian)
+    tokyo.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+    let calendars = SequencedCalendar(
+      calendars: [utcCalendar, losAngeles, tokyo]
+    )
+    let repository = try makeRepository()
+    try enable([.claude], in: repository)
+    let adapter = AdapterSpy(provider: .claude, result: .success([]))
+    let coordinator = RefreshCoordinator(
+      adapters: [adapter],
+      repository: repository,
+      clock: FixedClock(now: instant),
+      calendarProvider: calendars.current
+    )
+
+    let snapshot = await coordinator.refresh(reason: .manual)
+    let fetchCount = await adapter.fetchCount
+    let expectedWindow = try MonthWindow.current(
+      containing: instant,
+      calendar: tokyo
+    )
+
+    XCTAssertEqual(fetchCount, 2)
+    XCTAssertEqual(snapshot.monthWindow, expectedWindow)
+    XCTAssertEqual(
+      snapshot.evaluationCalendar.timeZone.identifier,
+      tokyo.timeZone.identifier
+    )
+  }
+
   func testFreshnessGuardOnlyAppliesToPopoverReason() async throws {
     let reasons: [RefreshReason] = [
       .launch, .periodic, .manual, .providerEnabled(.claude),
@@ -842,6 +915,25 @@ private final class MutableCalendar: @unchecked Sendable {
   }
 }
 
+private final class SequencedCalendar: @unchecked Sendable {
+  private let lock = NSLock()
+  private let calendars: [Calendar]
+  private var index = 0
+
+  init(calendars: [Calendar]) {
+    precondition(!calendars.isEmpty)
+    self.calendars = calendars
+  }
+
+  func current() -> Calendar {
+    lock.withLock {
+      let calendar = calendars[min(index, calendars.count - 1)]
+      index += 1
+      return calendar
+    }
+  }
+}
+
 private actor AdapterSpy: ProviderAdapter {
   nonisolated let provider: ProviderID
   private let implementation: @Sendable (MonthWindow) async throws -> ProviderFetchResult
@@ -1028,6 +1120,59 @@ private actor NonCooperativeAdapter: ProviderAdapter {
     await withCheckedContinuation { continuation in
       finishWaiters.append(continuation)
     }
+  }
+}
+
+private actor CalendarSwitchingAdapter: ProviderAdapter {
+  nonisolated let provider: ProviderID
+  private let fetchedAt: Date
+  private(set) var fetchedWindows: [MonthWindow] = []
+  private var firstFetchStarted = false
+  private var firstFetchStartWaiters: [CheckedContinuation<Void, Never>] = []
+  private var firstFetchContinuation: CheckedContinuation<Void, Never>?
+
+  init(provider: ProviderID, fetchedAt: Date) {
+    self.provider = provider
+    self.fetchedAt = fetchedAt
+  }
+
+  func fetch(window: MonthWindow) async throws -> ProviderFetchResult {
+    fetchedWindows.append(window)
+    if fetchedWindows.count == 1 {
+      firstFetchStarted = true
+      let waiters = firstFetchStartWaiters
+      firstFetchStartWaiters.removeAll()
+      for waiter in waiters {
+        waiter.resume()
+      }
+      await withCheckedContinuation {
+        firstFetchContinuation = $0
+      }
+    }
+    return ProviderFetchResult(
+      provider: provider,
+      records: [],
+      attempts: [
+        SourceAttempt(
+          strategyID: "calendar-source",
+          outcome: .succeeded(recordCount: 0)
+        )
+      ],
+      refreshedSourceIDs: ["calendar-source"],
+      fetchedAt: fetchedAt
+    )
+  }
+
+  func waitUntilFirstFetchStarted() async {
+    if firstFetchStarted { return }
+    await withCheckedContinuation {
+      firstFetchStartWaiters.append($0)
+    }
+  }
+
+  func releaseFirstFetch() {
+    firstFetchContinuation?.resume()
+    firstFetchContinuation = nil
   }
 }
 

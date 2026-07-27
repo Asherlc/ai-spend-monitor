@@ -24,10 +24,8 @@ final class BudgetAlertRuntimeTests: XCTestCase {
       )
     }
     var delivered: [BudgetAlertDecision] = []
-    let calendar = Self.utcCalendar
     let runtime = BudgetAlertRuntime(
       repository: repository,
-      calendarProvider: { calendar },
       deliver: {
         delivered.append($0)
         return $0.nextState
@@ -62,10 +60,8 @@ final class BudgetAlertRuntimeTests: XCTestCase {
       lastPacingState: .onPace
     )
     try repository.saveAlertState(prior)
-    let calendar = Self.utcCalendar
     let runtime = BudgetAlertRuntime(
       repository: repository,
-      calendarProvider: { calendar },
       deliver: { _ in
         throw RuntimeTestError.deliveryRejected(
           "Authorization: Bearer secret-notification-token"
@@ -102,10 +98,8 @@ final class BudgetAlertRuntimeTests: XCTestCase {
       )
     )
     var delivered: [BudgetAlertDecision] = []
-    let calendar = Self.utcCalendar
     let runtime = BudgetAlertRuntime(
       repository: repository,
-      calendarProvider: { calendar },
       deliver: {
         delivered.append($0)
         return $0.nextState
@@ -162,10 +156,8 @@ final class BudgetAlertRuntimeTests: XCTestCase {
       )
     )
     let gate = DeliveryGate()
-    let calendar = Self.utcCalendar
     let runtime = BudgetAlertRuntime(
       repository: repository,
-      calendarProvider: { calendar },
       deliver: { decision in
         await gate.deliver(decision)
       }
@@ -198,6 +190,38 @@ final class BudgetAlertRuntimeTests: XCTestCase {
     XCTAssertEqual(finalDeliveryCount, 1)
   }
 
+  func testAlertLocalDayUsesSnapshotCalendarInsteadOfRecallingProvider() async throws {
+    let repository = try makeRepository()
+    let instant = Date(timeIntervalSince1970: 1_722_474_000)  // Aug 1 UTC, Jul 31 LA
+    let budget = try repository.addBudget(limit: Money(500), now: instant)
+    try repository.saveAlertState(
+      StoredBudgetAlertState(
+        budgetID: budget.id,
+        lastPacingState: .collecting
+      )
+    )
+    var losAngeles = Calendar(identifier: .gregorian)
+    losAngeles.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    var delivered: [BudgetAlertDecision] = []
+    let runtime = BudgetAlertRuntime(
+      repository: repository,
+      deliver: {
+        delivered.append($0)
+        return $0.nextState
+      }
+    )
+    let snapshot = snapshot(
+      now: instant,
+      spend: Money(1_000),
+      budgets: [budget],
+      evaluationCalendar: losAngeles
+    )
+
+    _ = await runtime.process(snapshot: snapshot)
+
+    XCTAssertEqual(delivered.map(\.localDay), ["2024-07-31"])
+  }
+
   private func offPaceSnapshot(
     now: Date,
     budgets: [BudgetDefinition]
@@ -208,11 +232,13 @@ final class BudgetAlertRuntimeTests: XCTestCase {
   private func snapshot(
     now: Date,
     spend: Money,
-    budgets: [BudgetDefinition]
+    budgets: [BudgetDefinition],
+    evaluationCalendar: Calendar? = nil
   ) -> RefreshSnapshot {
+    let calendar = evaluationCalendar ?? Self.utcCalendar
     let window = try! MonthWindow.current(
       containing: now,
-      calendar: Self.utcCalendar
+      calendar: calendar
     )
     return RefreshSnapshot(
       summary: MonthlySummary(
@@ -235,6 +261,7 @@ final class BudgetAlertRuntimeTests: XCTestCase {
       refreshedAt: now,
       evaluatedAt: now,
       monthWindow: window,
+      evaluationCalendar: calendar,
       dataAvailability: .available
     )
   }

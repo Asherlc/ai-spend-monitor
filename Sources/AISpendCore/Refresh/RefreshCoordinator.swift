@@ -21,6 +21,7 @@ public struct RefreshSnapshot: Sendable {
   public let refreshedAt: Date
   public let evaluatedAt: Date
   public let monthWindow: MonthWindow
+  public let evaluationCalendar: Calendar
   public let providerStates: [ProviderID: StoredProviderState]
   public let dataAvailability: CurrentMonthDataAvailability
   public let providerAvailability: [ProviderID: CurrentMonthDataAvailability]
@@ -33,6 +34,7 @@ public struct RefreshSnapshot: Sendable {
     refreshedAt: Date,
     evaluatedAt: Date? = nil,
     monthWindow: MonthWindow? = nil,
+    evaluationCalendar: Calendar? = nil,
     providerStates: [ProviderID: StoredProviderState] = [:],
     dataAvailability: CurrentMonthDataAvailability? = nil,
     providerAvailability: [ProviderID: CurrentMonthDataAvailability] = [:]
@@ -47,6 +49,7 @@ public struct RefreshSnapshot: Sendable {
       monthWindow
       ?? (try? MonthWindow.current(containing: refreshedAt, calendar: .current))
       ?? MonthWindow(start: refreshedAt, end: refreshedAt.addingTimeInterval(1))
+    self.evaluationCalendar = evaluationCalendar ?? .current
     self.providerStates = providerStates
     let resolvedAvailability =
       dataAvailability
@@ -151,28 +154,240 @@ public final class RefreshCoordinator {
     } catch {
       return repositoryFailureSnapshot(
         at: now,
+        calendar: calendar,
         message: "Unable to read provider states"
       )
     }
 
     if reason == .popover,
-      lastSnapshot?.monthWindow == nil || lastSnapshot?.monthWindow == window,
       let lastAttemptAt = initialStates.values.compactMap(\.lastAttemptAt).max(),
-      now.timeIntervalSince(lastAttemptAt) < 60,
-      let snapshot = try? cachedSnapshot()
+      now.timeIntervalSince(lastAttemptAt) < 60
     {
+      if let lastSnapshot,
+        lastSnapshot.monthWindow == window,
+        sameEvaluationCalendar(
+          lastSnapshot.evaluationCalendar,
+          calendar
+        )
+      {
+        return lastSnapshot
+      }
+      if lastSnapshot == nil {
+        return makeCachedSnapshot(
+          window: window,
+          calendar: calendar,
+          now: now,
+          states: initialStates
+        )
+      }
+    }
+
+    var activeNow = now
+    var activeCalendar = calendar
+    var activeWindow = window
+    var states = initialStates
+    var outcomes: [AdapterOutcome] = []
+    var remainingCalendarRetries = 1
+    while true {
+      states = (try? repository.providerStates()) ?? states
+      let enabledProviders = Set(
+        states.values.filter(\.isEnabled).map(\.provider)
+      )
+      outcomes = await fetchOutcomes(
+        window: activeWindow,
+        enabledProviders: enabledProviders
+      )
+
+      if Task.isCancelled {
+        return (try? cachedSnapshot())
+          ?? fallbackSnapshot(at: clock.now, calendar: calendarProvider())
+      }
+
+      let latestNow = clock.now
+      let latestCalendar = calendarProvider()
+      guard
+        let latestWindow = try? MonthWindow.current(
+          containing: latestNow,
+          calendar: latestCalendar
+        )
+      else {
+        return fallbackSnapshot(at: latestNow, calendar: latestCalendar)
+      }
+      let contextChanged =
+        latestWindow != activeWindow
+        || !sameEvaluationCalendar(activeCalendar, latestCalendar)
+      guard contextChanged else {
+        activeNow = latestNow
+        break
+      }
+
+      activeNow = latestNow
+      activeCalendar = latestCalendar
+      activeWindow = latestWindow
+      if remainingCalendarRetries > 0 {
+        remainingCalendarRetries -= 1
+        continue
+      }
+
+      states = (try? repository.providerStates()) ?? states
+      let currentEnabledProviders = Set(
+        states.values.filter(\.isEnabled).map(\.provider)
+      )
+      let snapshot = makeSnapshot(
+        window: activeWindow,
+        calendar: activeCalendar,
+        enabledProviders: currentEnabledProviders,
+        states: states,
+        attempts: [:],
+        refreshedAt: activeNow,
+        evaluatedAt: activeNow
+      )
+      lastSnapshot = snapshot
       return snapshot
     }
 
-    let enabledProviders = Set(
-      initialStates.values.filter(\.isEnabled).map(\.provider)
+    var attempts: [ProviderID: [SourceAttempt]] = [:]
+    for outcome in outcomes {
+      switch outcome {
+      case .success(let result):
+        let provider = result.provider
+        do {
+          let currentStates = try repository.providerStates()
+          guard
+            let current = currentStates[provider],
+            current.isEnabled
+          else {
+            if let current = currentStates[provider] {
+              states[provider] = current
+            }
+            continue
+          }
+          let sanitizedAttempts = sanitize(result.attempts)
+          let failureMessage = firstProblemMessage(in: sanitizedAttempts)
+          let state = StoredProviderState(
+            provider: provider,
+            isEnabled: current.isEnabled,
+            lastAttemptAt: activeNow,
+            lastSuccessfulAt: result.refreshedSourceIDs.isEmpty
+              ? current.lastSuccessfulAt
+              : activeNow,
+            refreshStatus: failureMessage == nil ? .success : .failed,
+            lastFailureMessage: failureMessage
+          )
+          try persist(result: result, state: state, in: activeWindow)
+          states[provider] = state
+          attempts[provider] = sanitizedAttempts
+        } catch {
+          recordFailure(
+            provider: provider,
+            message: String(describing: error),
+            now: activeNow,
+            states: &states,
+            attempts: &attempts
+          )
+        }
+      case .failure(let provider, let message):
+        recordFailure(
+          provider: provider,
+          message: message,
+          now: activeNow,
+          states: &states,
+          attempts: &attempts
+        )
+      case .cancelled:
+        break
+      }
+    }
+
+    if let currentStates = try? repository.providerStates() {
+      states = currentStates
+    }
+    let currentEnabledProviders = Set(
+      states.values.filter(\.isEnabled).map(\.provider)
     )
+    let snapshot = makeSnapshot(
+      window: activeWindow,
+      calendar: activeCalendar,
+      enabledProviders: currentEnabledProviders,
+      states: states,
+      attempts: attempts,
+      refreshedAt: activeNow,
+      evaluatedAt: activeNow
+    )
+    lastSnapshot = snapshot
+    return snapshot
+  }
+
+  public func cachedSnapshot() throws -> RefreshSnapshot {
+    let now = clock.now
+    let calendar = calendarProvider()
+    let window = try MonthWindow.current(
+      containing: now,
+      calendar: calendar
+    )
+    if let lastSnapshot,
+      lastSnapshot.monthWindow == window,
+      sameEvaluationCalendar(lastSnapshot.evaluationCalendar, calendar)
+    {
+      return lastSnapshot
+    }
+
+    let states = try repository.providerStates()
+    return makeCachedSnapshot(
+      window: window,
+      calendar: calendar,
+      now: now,
+      states: states
+    )
+  }
+
+  private func makeCachedSnapshot(
+    window: MonthWindow,
+    calendar: Calendar,
+    now: Date,
+    states: [ProviderID: StoredProviderState]
+  ) -> RefreshSnapshot {
+    let enabledProviders = Set(
+      states.values.filter(\.isEnabled).map(\.provider)
+    )
+    let attempts = states.reduce(into: [ProviderID: [SourceAttempt]]()) {
+      result,
+      entry in
+      guard
+        entry.value.refreshStatus == .failed,
+        let message = entry.value.lastFailureMessage
+      else {
+        return
+      }
+      result[entry.key] = [
+        SourceAttempt(
+          strategyID: "refresh",
+          outcome: .failed(redactedMessage: sanitizer.sanitize(message))
+        )
+      ]
+    }
+    let refreshedAt = states.values.compactMap(\.lastAttemptAt).max() ?? now
+    return makeSnapshot(
+      window: window,
+      calendar: calendar,
+      enabledProviders: enabledProviders,
+      states: states,
+      attempts: attempts,
+      refreshedAt: refreshedAt,
+      evaluatedAt: now
+    )
+  }
+
+  private func fetchOutcomes(
+    window: MonthWindow,
+    enabledProviders: Set<ProviderID>
+  ) async -> [AdapterOutcome] {
     let enabledAdapters = adapters.filter {
       enabledProviders.contains($0.provider)
     }
     let timeout = timeout
     let runWithTimeout = runWithTimeout
-    let outcomes = await withTaskGroup(
+    return await withTaskGroup(
       of: AdapterOutcome.self,
       returning: [AdapterOutcome].self
     ) { group in
@@ -214,121 +429,6 @@ public final class RefreshCoordinator {
       }
       return collected
     }
-
-    if Task.isCancelled {
-      return (try? cachedSnapshot()) ?? fallbackSnapshot(at: now, calendar: calendar)
-    }
-
-    var states = initialStates
-    var attempts: [ProviderID: [SourceAttempt]] = [:]
-    for outcome in outcomes {
-      switch outcome {
-      case .success(let result):
-        let provider = result.provider
-        do {
-          let currentStates = try repository.providerStates()
-          guard
-            let current = currentStates[provider],
-            current.isEnabled
-          else {
-            if let current = currentStates[provider] {
-              states[provider] = current
-            }
-            continue
-          }
-          let sanitizedAttempts = sanitize(result.attempts)
-          let failureMessage = firstProblemMessage(in: sanitizedAttempts)
-          let state = StoredProviderState(
-            provider: provider,
-            isEnabled: current.isEnabled,
-            lastAttemptAt: now,
-            lastSuccessfulAt: result.refreshedSourceIDs.isEmpty
-              ? current.lastSuccessfulAt
-              : now,
-            refreshStatus: failureMessage == nil ? .success : .failed,
-            lastFailureMessage: failureMessage
-          )
-          try persist(result: result, state: state, in: window)
-          states[provider] = state
-          attempts[provider] = sanitizedAttempts
-        } catch {
-          recordFailure(
-            provider: provider,
-            message: String(describing: error),
-            now: now,
-            states: &states,
-            attempts: &attempts
-          )
-        }
-      case .failure(let provider, let message):
-        recordFailure(
-          provider: provider,
-          message: message,
-          now: now,
-          states: &states,
-          attempts: &attempts
-        )
-      case .cancelled:
-        break
-      }
-    }
-
-    if let currentStates = try? repository.providerStates() {
-      states = currentStates
-    }
-    let currentEnabledProviders = Set(
-      states.values.filter(\.isEnabled).map(\.provider)
-    )
-    let snapshot = makeSnapshot(
-      window: window,
-      enabledProviders: currentEnabledProviders,
-      states: states,
-      attempts: attempts,
-      refreshedAt: now
-    )
-    lastSnapshot = snapshot
-    return snapshot
-  }
-
-  public func cachedSnapshot() throws -> RefreshSnapshot {
-    let now = clock.now
-    let calendar = calendarProvider()
-    let window = try MonthWindow.current(
-      containing: now,
-      calendar: calendar
-    )
-    if let lastSnapshot, lastSnapshot.monthWindow == window {
-      return lastSnapshot
-    }
-
-    let states = try repository.providerStates()
-    let enabledProviders = Set(
-      states.values.filter(\.isEnabled).map(\.provider)
-    )
-    let attempts = states.reduce(into: [ProviderID: [SourceAttempt]]()) {
-      result,
-      entry in
-      guard
-        entry.value.refreshStatus == .failed,
-        let message = entry.value.lastFailureMessage
-      else {
-        return
-      }
-      result[entry.key] = [
-        SourceAttempt(
-          strategyID: "refresh",
-          outcome: .failed(redactedMessage: sanitizer.sanitize(message))
-        )
-      ]
-    }
-    let refreshedAt = states.values.compactMap(\.lastAttemptAt).max() ?? now
-    return makeSnapshot(
-      window: window,
-      enabledProviders: enabledProviders,
-      states: states,
-      attempts: attempts,
-      refreshedAt: refreshedAt
-    )
   }
 
   public nonisolated static func withTimeout(
@@ -421,10 +521,12 @@ public final class RefreshCoordinator {
 
   private func makeSnapshot(
     window: MonthWindow,
+    calendar: Calendar,
     enabledProviders: Set<ProviderID>,
     states: [ProviderID: StoredProviderState],
     attempts initialAttempts: [ProviderID: [SourceAttempt]],
-    refreshedAt: Date
+    refreshedAt: Date,
+    evaluatedAt: Date
   ) -> RefreshSnapshot {
     var attempts = initialAttempts
     var spendRecordsReadFailed = false
@@ -447,7 +549,7 @@ public final class RefreshCoordinator {
     let reconciled = reconciler.reconcile(enabledRecords).included
     let freshness = Dictionary(
       uniqueKeysWithValues: enabledProviders.map {
-        ($0, providerFreshness(for: states[$0], now: clock.now))
+        ($0, providerFreshness(for: states[$0], now: evaluatedAt))
       }
     )
     let aggregated = aggregator.summarize(
@@ -462,7 +564,7 @@ public final class RefreshCoordinator {
         guard let lastSuccessfulAt = states[$0]?.lastSuccessfulAt else {
           return true
         }
-        return clock.now.timeIntervalSince(lastSuccessfulAt) > 30 * 60
+        return evaluatedAt.timeIntervalSince(lastSuccessfulAt) > 30 * 60
       }
     let budgets: [BudgetDefinition]
     do {
@@ -500,7 +602,7 @@ public final class RefreshCoordinator {
     let pacing = pacingEngine.evaluate(
       spend: summary.total,
       budgets: budgets,
-      now: clock.now,
+      now: evaluatedAt,
       window: window,
       hasAnyData: dataAvailability == .available,
       allDataIsStale: allDataIsStale,
@@ -512,8 +614,9 @@ public final class RefreshCoordinator {
       attempts: attempts,
       allDataIsStale: allDataIsStale,
       refreshedAt: refreshedAt,
-      evaluatedAt: clock.now,
+      evaluatedAt: evaluatedAt,
       monthWindow: window,
+      evaluationCalendar: calendar,
       providerStates: states,
       dataAvailability: dataAvailability,
       providerAvailability: providerAvailability
@@ -571,6 +674,7 @@ public final class RefreshCoordinator {
       refreshedAt: now,
       evaluatedAt: now,
       monthWindow: window,
+      evaluationCalendar: calendar,
       providerStates: [:],
       dataAvailability: .unavailable,
       providerAvailability: [:]
@@ -579,6 +683,7 @@ public final class RefreshCoordinator {
 
   private func repositoryFailureSnapshot(
     at now: Date,
+    calendar: Calendar,
     message: String
   ) -> RefreshSnapshot {
     let redactedMessage = sanitizer.sanitize(message)
@@ -610,7 +715,7 @@ public final class RefreshCoordinator {
         )
       }
     )
-    let fallback = fallbackSnapshot(at: now)
+    let fallback = fallbackSnapshot(at: now, calendar: calendar)
     return RefreshSnapshot(
       summary: fallback.summary,
       pacing: fallback.pacing,
@@ -619,6 +724,7 @@ public final class RefreshCoordinator {
       refreshedAt: now,
       evaluatedAt: now,
       monthWindow: fallback.monthWindow,
+      evaluationCalendar: fallback.evaluationCalendar,
       providerStates: states,
       dataAvailability: .unavailable,
       providerAvailability: Dictionary(
@@ -641,6 +747,17 @@ public final class RefreshCoordinator {
       }
     }
     return nil
+  }
+
+  private func sameEvaluationCalendar(
+    _ lhs: Calendar,
+    _ rhs: Calendar
+  ) -> Bool {
+    lhs.identifier == rhs.identifier
+      && lhs.timeZone == rhs.timeZone
+      && lhs.locale?.identifier == rhs.locale?.identifier
+      && lhs.firstWeekday == rhs.firstWeekday
+      && lhs.minimumDaysInFirstWeek == rhs.minimumDaysInFirstWeek
   }
 
   private func appendRepositoryFailure(
