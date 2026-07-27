@@ -33,6 +33,21 @@ public struct SpendRecord: Identifiable, Codable, Hashable, Sendable {
   public let fetchedAt: Date
   public let estimate: EstimateMetadata?
 
+  private enum CodingKeys: String, CodingKey {
+    case id
+    case provider
+    case accountFingerprint
+    case model
+    case intervalStart
+    case intervalEnd
+    case amount
+    case quality
+    case sourceID
+    case observationID
+    case fetchedAt
+    case estimate
+  }
+
   public init(
     id: String,
     provider: ProviderID,
@@ -72,6 +87,24 @@ public struct SpendRecord: Identifiable, Codable, Hashable, Sendable {
     self.observationID = observationID
     self.fetchedAt = fetchedAt
     self.estimate = estimate
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    try self.init(
+      id: container.decode(String.self, forKey: .id),
+      provider: container.decode(ProviderID.self, forKey: .provider),
+      accountFingerprint: container.decode(String.self, forKey: .accountFingerprint),
+      model: container.decode(String.self, forKey: .model),
+      intervalStart: container.decode(Date.self, forKey: .intervalStart),
+      intervalEnd: container.decode(Date.self, forKey: .intervalEnd),
+      amount: container.decode(Money.self, forKey: .amount),
+      quality: container.decode(SpendQuality.self, forKey: .quality),
+      sourceID: container.decode(String.self, forKey: .sourceID),
+      observationID: container.decode(String.self, forKey: .observationID),
+      fetchedAt: container.decode(Date.self, forKey: .fetchedAt),
+      estimate: container.decodeIfPresent(EstimateMetadata.self, forKey: .estimate)
+    )
   }
 
   enum ValidationError: Error {

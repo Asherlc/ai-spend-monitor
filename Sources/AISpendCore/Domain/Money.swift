@@ -12,11 +12,19 @@ public struct Money: Codable, Hashable, Comparable, Sendable {
   public static let zero = Money(0)
 
   public static func + (lhs: Money, rhs: Money) -> Money {
-    Money(lhs.amount + rhs.amount, currency: lhs.currency)
+    precondition(
+      lhs.currency == "USD" && rhs.currency == "USD",
+      "Money arithmetic supports USD only."
+    )
+    return Money(lhs.amount + rhs.amount, currency: lhs.currency)
   }
 
   public static func - (lhs: Money, rhs: Money) -> Money {
-    Money(lhs.amount - rhs.amount, currency: lhs.currency)
+    precondition(
+      lhs.currency == "USD" && rhs.currency == "USD",
+      "Money arithmetic supports USD only."
+    )
+    return Money(lhs.amount - rhs.amount, currency: lhs.currency)
   }
 
   public static func * (lhs: Money, rhs: Decimal) -> Money {
