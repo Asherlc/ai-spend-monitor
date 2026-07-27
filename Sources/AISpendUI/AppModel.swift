@@ -48,6 +48,73 @@ public struct ProviderPresentation: Identifiable, Hashable, Sendable {
   }
 }
 
+public enum BudgetValidationResult: Equatable, Sendable {
+  case success
+  case validationError(String)
+  case persistenceError(String)
+}
+
+public struct ProviderSettingPresentation: Identifiable, Hashable, Sendable {
+  public let id: ProviderID
+  public let displayName: String
+  public let isEnabled: Bool
+  public let status: ProviderStatus
+  public let activeSources: [String]
+}
+
+public struct ProviderDiagnosticEntry: Identifiable, Hashable, Sendable {
+  public let strategyID: String
+  public let outcome: String
+  public let detail: String
+
+  public var id: String { "\(strategyID):\(outcome):\(detail)" }
+}
+
+@MainActor
+public struct AppSettingsActions {
+  let loadBudgets: () throws -> [BudgetDefinition]
+  let saveProviderState: (StoredProviderState) throws -> Void
+  let addBudget: (Money, Date) throws -> BudgetDefinition
+  let updateBudget: (BudgetDefinition) throws -> Void
+  let removeBudget: (UUID) throws -> Void
+  let loadBrowserDiscoveryEnabled: () -> Bool
+  let saveBrowserDiscoveryEnabled: (Bool) throws -> Void
+  let requestNotificationAuthorization:
+    ([BudgetDefinition], [BudgetDefinition]) async throws -> Bool
+
+  public init(
+    loadBudgets: @escaping () throws -> [BudgetDefinition],
+    saveProviderState: @escaping (StoredProviderState) throws -> Void,
+    addBudget: @escaping (Money, Date) throws -> BudgetDefinition,
+    updateBudget: @escaping (BudgetDefinition) throws -> Void,
+    removeBudget: @escaping (UUID) throws -> Void,
+    loadBrowserDiscoveryEnabled: @escaping () -> Bool,
+    saveBrowserDiscoveryEnabled: @escaping (Bool) throws -> Void,
+    requestNotificationAuthorization:
+      @escaping ([BudgetDefinition], [BudgetDefinition]) async throws -> Bool
+  ) {
+    self.loadBudgets = loadBudgets
+    self.saveProviderState = saveProviderState
+    self.addBudget = addBudget
+    self.updateBudget = updateBudget
+    self.removeBudget = removeBudget
+    self.loadBrowserDiscoveryEnabled = loadBrowserDiscoveryEnabled
+    self.saveBrowserDiscoveryEnabled = saveBrowserDiscoveryEnabled
+    self.requestNotificationAuthorization = requestNotificationAuthorization
+  }
+
+  public static let unavailable = AppSettingsActions(
+    loadBudgets: { [] },
+    saveProviderState: { _ in throw AppSettingsError.unavailable },
+    addBudget: { _, _ in throw AppSettingsError.unavailable },
+    updateBudget: { _ in throw AppSettingsError.unavailable },
+    removeBudget: { _ in throw AppSettingsError.unavailable },
+    loadBrowserDiscoveryEnabled: { true },
+    saveBrowserDiscoveryEnabled: { _ in throw AppSettingsError.unavailable },
+    requestNotificationAuthorization: { _, _ in false }
+  )
+}
+
 @MainActor
 @Observable
 public final class AppModel {
@@ -60,19 +127,34 @@ public final class AppModel {
   public private(set) var isRefreshing = false
   public private(set) var records: [SpendRecord] = []
   public private(set) var dailyHistoryUnavailable = false
+  public private(set) var budgets: [BudgetDefinition] = []
+  public private(set) var browserDiscoveryEnabled = true
+  public private(set) var settingsError: String?
   public var selectedProvider: ProviderID?
 
   private let refreshAction: RefreshAction
   private let recordLoader: RecordLoader?
+  private let settingsActions: AppSettingsActions
+  private let now: () -> Date
 
   public init(
     snapshot: RefreshSnapshot,
     refresh: @escaping RefreshAction,
-    records: RecordLoader? = nil
+    records: RecordLoader? = nil,
+    settings: AppSettingsActions = .unavailable,
+    now: @escaping () -> Date = Date.init
   ) {
     self.snapshot = snapshot
     refreshAction = refresh
     recordLoader = records
+    settingsActions = settings
+    self.now = now
+    browserDiscoveryEnabled = settings.loadBrowserDiscoveryEnabled()
+    do {
+      budgets = try settings.loadBudgets().sorted(by: Self.budgetOrder)
+    } catch {
+      settingsError = "Budgets could not be loaded."
+    }
     if let records {
       do {
         self.records = try records()
@@ -86,12 +168,16 @@ public final class AppModel {
   public convenience init(
     snapshot: RefreshSnapshot,
     coordinator: RefreshCoordinator,
-    records: RecordLoader? = nil
+    records: RecordLoader? = nil,
+    settings: AppSettingsActions = .unavailable,
+    now: @escaping () -> Date = Date.init
   ) {
     self.init(
       snapshot: snapshot,
       refresh: { reason in await coordinator.refresh(reason: reason) },
-      records: records
+      records: records,
+      settings: settings,
+      now: now
     )
   }
 
@@ -222,6 +308,155 @@ public final class AppModel {
     snapshot.attempts[provider] ?? []
   }
 
+  public var providerSettings: [ProviderSettingPresentation] {
+    ProviderDescriptor.builtIns.map { descriptor in
+      let state = snapshot.providerStates[descriptor.id]
+      let attempts = attempts(for: descriptor.id)
+      return ProviderSettingPresentation(
+        id: descriptor.id,
+        displayName: descriptor.displayName,
+        isEnabled: state?.isEnabled ?? true,
+        status: providerStatus(state: state, attempts: attempts),
+        activeSources: attempts.compactMap { attempt in
+          if case .succeeded = attempt.outcome { return attempt.strategyID }
+          return nil
+        }
+      )
+    }
+  }
+
+  public func diagnosticEntries(
+    for provider: ProviderID
+  ) -> [ProviderDiagnosticEntry] {
+    let sanitizer = DiagnosticSanitizer()
+    return attempts(for: provider).map { attempt in
+      switch attempt.outcome {
+      case .succeeded(let recordCount):
+        ProviderDiagnosticEntry(
+          strategyID: attempt.strategyID,
+          outcome: "Succeeded",
+          detail: "\(recordCount) records"
+        )
+      case .unavailable(let reason):
+        ProviderDiagnosticEntry(
+          strategyID: attempt.strategyID,
+          outcome: "Unavailable",
+          detail: sanitizer.sanitize(reason)
+        )
+      case .failed(let message):
+        ProviderDiagnosticEntry(
+          strategyID: attempt.strategyID,
+          outcome: "Failed",
+          detail: sanitizer.sanitize(message)
+        )
+      }
+    }
+  }
+
+  public func setProvider(_ provider: ProviderID, enabled: Bool) async {
+    settingsError = nil
+    let prior =
+      snapshot.providerStates[provider]
+      ?? StoredProviderState(provider: provider, isEnabled: !enabled)
+    let replacement = StoredProviderState(
+      provider: provider,
+      isEnabled: enabled,
+      lastAttemptAt: prior.lastAttemptAt,
+      lastSuccessfulAt: prior.lastSuccessfulAt,
+      refreshStatus: prior.refreshStatus,
+      lastFailureMessage: prior.lastFailureMessage
+    )
+    do {
+      try settingsActions.saveProviderState(replacement)
+    } catch {
+      settingsError = "The provider setting could not be saved."
+      return
+    }
+    await performRefresh(reason: enabled ? .providerEnabled(provider) : .manual)
+  }
+
+  public func addBudget(
+    decimalText: String
+  ) async -> BudgetValidationResult {
+    guard let amount = Self.parsePositiveDecimal(decimalText) else {
+      return validationFailure("Enter a positive USD amount using a decimal point.")
+    }
+    guard !budgets.contains(where: { $0.limit.amount == amount }) else {
+      return validationFailure("A budget with that amount already exists.")
+    }
+    let previousBudgets = budgets
+    do {
+      _ = try settingsActions.addBudget(Money(amount), now())
+      try reloadBudgets()
+      await requestNotificationAuthorization(
+        previousBudgets: previousBudgets,
+        currentBudgets: budgets
+      )
+      await performRefresh(reason: .manual)
+      return .success
+    } catch LedgerError.duplicateBudget {
+      return validationFailure("A budget with that amount already exists.")
+    } catch LedgerError.invalidBudget {
+      return validationFailure("Enter a positive USD amount.")
+    } catch {
+      return persistenceFailure("The budget could not be saved.")
+    }
+  }
+
+  public func updateBudget(
+    _ budget: BudgetDefinition
+  ) async -> BudgetValidationResult {
+    guard budget.limit.currency == "USD", budget.limit.amount > 0 else {
+      return validationFailure("Enter a positive USD amount.")
+    }
+    guard
+      !budgets.contains(where: {
+        $0.id != budget.id && $0.limit.amount == budget.limit.amount
+      })
+    else {
+      return validationFailure("A budget with that amount already exists.")
+    }
+    let previousBudgets = budgets
+    do {
+      try settingsActions.updateBudget(budget)
+      try reloadBudgets()
+      await requestNotificationAuthorization(
+        previousBudgets: previousBudgets,
+        currentBudgets: budgets
+      )
+      await performRefresh(reason: .manual)
+      return .success
+    } catch LedgerError.duplicateBudget {
+      return validationFailure("A budget with that amount already exists.")
+    } catch LedgerError.invalidBudget {
+      return validationFailure("Enter a positive USD amount.")
+    } catch {
+      return persistenceFailure("The budget could not be saved.")
+    }
+  }
+
+  public func removeBudget(id: UUID) async {
+    do {
+      try settingsActions.removeBudget(id)
+      try reloadBudgets()
+      settingsError = nil
+      await performRefresh(reason: .manual)
+    } catch {
+      settingsError = "The budget could not be removed."
+    }
+  }
+
+  public func setBrowserDiscoveryEnabled(_ enabled: Bool) async {
+    do {
+      try settingsActions.saveBrowserDiscoveryEnabled(enabled)
+      browserDiscoveryEnabled = settingsActions.loadBrowserDiscoveryEnabled()
+      settingsError = nil
+      await performRefresh(reason: .manual)
+    } catch {
+      settingsError = "The browser discovery setting could not be saved."
+    }
+  }
+
   private func performRefresh(reason: RefreshReason) async {
     guard !isRefreshing else { return }
     isRefreshing = true
@@ -241,6 +476,61 @@ public final class AppModel {
     {
       self.selectedProvider = nil
     }
+  }
+
+  private func reloadBudgets() throws {
+    budgets = try settingsActions.loadBudgets().sorted(by: Self.budgetOrder)
+  }
+
+  private func requestNotificationAuthorization(
+    previousBudgets: [BudgetDefinition],
+    currentBudgets: [BudgetDefinition]
+  ) async {
+    do {
+      _ = try await settingsActions.requestNotificationAuthorization(
+        previousBudgets,
+        currentBudgets
+      )
+      settingsError = nil
+    } catch {
+      settingsError =
+        "The budget was saved, but notification permission could not be requested."
+    }
+  }
+
+  private func validationFailure(_ message: String) -> BudgetValidationResult {
+    settingsError = message
+    return .validationError(message)
+  }
+
+  private func persistenceFailure(_ message: String) -> BudgetValidationResult {
+    settingsError = message
+    return .persistenceError(message)
+  }
+
+  private static func parsePositiveDecimal(_ text: String) -> Decimal? {
+    guard
+      text.range(
+        of: #"^[0-9]+(?:\.[0-9]+)?$"#,
+        options: .regularExpression
+      ) != nil,
+      let value = Decimal(
+        string: text,
+        locale: Locale(identifier: "en_US_POSIX")
+      ),
+      value > 0
+    else {
+      return nil
+    }
+    return value
+  }
+
+  private static func budgetOrder(
+    _ lhs: BudgetDefinition,
+    _ rhs: BudgetDefinition
+  ) -> Bool {
+    if lhs.limit != rhs.limit { return lhs.limit < rhs.limit }
+    return lhs.id.uuidString < rhs.id.uuidString
   }
 
   private func providerStatus(
@@ -308,4 +598,8 @@ public final class AppModel {
       models: []
     )
   }
+}
+
+private enum AppSettingsError: Error {
+  case unavailable
 }

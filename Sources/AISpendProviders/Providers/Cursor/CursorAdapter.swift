@@ -6,6 +6,7 @@ public struct CursorAdapter: ProviderAdapter {
 
   private let adminCredential: @Sendable () throws -> Secret?
   private let appSessionAvailable: @Sendable () throws -> Bool
+  private let browserDiscoveryEnabled: @Sendable () -> Bool
   private let usage: @Sendable (MonthWindow, Secret) async throws -> CursorUsageResult
   private let fingerprinter: AccountFingerprinter
   private let calendar: Calendar
@@ -15,6 +16,7 @@ public struct CursorAdapter: ProviderAdapter {
   init(
     adminCredential: @escaping @Sendable () throws -> Secret?,
     appSessionAvailable: @escaping @Sendable () throws -> Bool,
+    browserDiscoveryEnabled: @escaping @Sendable () -> Bool = { true },
     usage: @escaping @Sendable (MonthWindow, Secret) async throws -> CursorUsageResult,
     fingerprinter: AccountFingerprinter = .production,
     calendar: Calendar = .current,
@@ -23,6 +25,7 @@ public struct CursorAdapter: ProviderAdapter {
   ) {
     self.adminCredential = adminCredential
     self.appSessionAvailable = appSessionAvailable
+    self.browserDiscoveryEnabled = browserDiscoveryEnabled
     self.usage = usage
     self.fingerprinter = fingerprinter
     self.calendar = calendar
@@ -33,6 +36,7 @@ public struct CursorAdapter: ProviderAdapter {
   public init(
     credentialHost: CredentialHost = CredentialHost(),
     stateReader: CursorStateReader = CursorStateReader(),
+    browserDiscovery: BrowserDiscoveryPreference = BrowserDiscoveryPreference(),
     httpClient: HTTPClient = HTTPClient(),
     calendar: Calendar = .current,
     now: @escaping @Sendable () -> Date = Date.init
@@ -46,6 +50,7 @@ public struct CursorAdapter: ProviderAdapter {
         let state = try stateReader.read()
         return state.accessToken != nil && state.teamID != nil
       },
+      browserDiscoveryEnabled: { browserDiscovery.isEnabled },
       usage: { window, adminKey in
         try await client.fetch(window: window, adminKey: adminKey)
       },
@@ -187,6 +192,14 @@ public struct CursorAdapter: ProviderAdapter {
 
   private func appAttempt() throws -> SourceAttempt {
     try Task.checkCancellation()
+    guard browserDiscoveryEnabled() else {
+      return .init(
+        strategyID: "cursor-app-session",
+        outcome: .unavailable(
+          reason: "Browser and app-session discovery is disabled."
+        )
+      )
+    }
     do {
       if try appSessionAvailable() {
         return .init(

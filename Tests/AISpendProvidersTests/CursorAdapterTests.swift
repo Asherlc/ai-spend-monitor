@@ -209,6 +209,38 @@ final class CursorAdapterTests: XCTestCase {
     )
   }
 
+  func testDisabledBrowserDiscoverySkipsAppStateButKeepsAdminStrategyActive() async throws {
+    let appStateReads = LockedInt()
+    let usageReads = LockedInt()
+    let adapter = CursorAdapter(
+      adminCredential: { Secret("admin") },
+      appSessionAvailable: {
+        appStateReads.increment()
+        return true
+      },
+      browserDiscoveryEnabled: { false },
+      usage: { _, _ in
+        usageReads.increment()
+        return CursorUsageResult(authoritativeCents: 100, modelCents: [:])
+      },
+      fingerprinter: .production,
+      calendar: utcCalendar(),
+      now: { juneDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(appStateReads.value, 0)
+    XCTAssertEqual(usageReads.value, 1)
+    XCTAssertEqual(
+      result.attempts.last,
+      SourceAttempt(
+        strategyID: "cursor-app-session",
+        outcome: .unavailable(reason: "Browser and app-session discovery is disabled.")
+      )
+    )
+  }
+
   func testRejectsNonCurrentMonthBeforeCallingSpendEndpoint() async throws {
     let usageCount = LockedInt()
     let adapter = CursorAdapter(

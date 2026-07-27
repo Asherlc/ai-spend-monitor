@@ -21,19 +21,8 @@ struct AISpendBarApp: App {
     .menuBarExtraStyle(.window)
 
     Settings {
-      Task10SettingsPlaceholder()
+      SettingsView(model: model)
     }
-  }
-}
-
-private struct Task10SettingsPlaceholder: View {
-  var body: some View {
-    ContentUnavailableView(
-      "Settings",
-      systemImage: "gearshape",
-      description: Text("Provider, budget, and privacy controls are being configured.")
-    )
-    .frame(width: 480, height: 320)
   }
 }
 
@@ -50,7 +39,17 @@ private enum AppEnvironment {
     let model = AppModel(
       snapshot: initialSnapshot,
       refresh: recovery.refresh,
-      records: recovery.records
+      records: recovery.records,
+      settings: AppSettingsActions(
+        loadBudgets: recovery.budgets,
+        saveProviderState: recovery.saveProviderState,
+        addBudget: recovery.addBudget,
+        updateBudget: recovery.updateBudget,
+        removeBudget: recovery.removeBudget,
+        loadBrowserDiscoveryEnabled: recovery.browserDiscoveryEnabled,
+        saveBrowserDiscoveryEnabled: recovery.saveBrowserDiscoveryEnabled,
+        requestNotificationAuthorization: recovery.requestNotificationAuthorization
+      )
     )
     Task { await model.launch() }
     return model
@@ -74,6 +73,7 @@ private enum AppEnvironment {
 @MainActor
 private final class BootstrapRecovery {
   private var runtime: AppRuntime?
+  private let notifications = BudgetNotificationClient()
 
   func prepare() throws -> RefreshSnapshot {
     let runtime = try makeRuntime()
@@ -103,6 +103,44 @@ private final class BootstrapRecovery {
       calendar: .current
     )
     return try runtime.repository.records(in: window)
+  }
+
+  func budgets() throws -> [BudgetDefinition] {
+    try requiredRuntime().repository.budgets()
+  }
+
+  func saveProviderState(_ state: StoredProviderState) throws {
+    try requiredRuntime().repository.saveProviderState(state)
+  }
+
+  func addBudget(limit: Money, now: Date) throws -> BudgetDefinition {
+    try requiredRuntime().repository.addBudget(limit: limit, now: now)
+  }
+
+  func updateBudget(_ budget: BudgetDefinition) throws {
+    try requiredRuntime().repository.updateBudget(budget)
+  }
+
+  func removeBudget(id: UUID) throws {
+    try requiredRuntime().repository.removeBudget(id: id)
+  }
+
+  func browserDiscoveryEnabled() -> Bool {
+    runtime?.browserDiscovery.isEnabled ?? true
+  }
+
+  func saveBrowserDiscoveryEnabled(_ enabled: Bool) throws {
+    (try requiredRuntime()).browserDiscovery.isEnabled = enabled
+  }
+
+  func requestNotificationAuthorization(
+    previousBudgets: [BudgetDefinition],
+    currentBudgets: [BudgetDefinition]
+  ) async throws -> Bool {
+    try await notifications.requestAuthorizationIfFirstEnabledBudget(
+      previousBudgets: previousBudgets,
+      currentBudgets: currentBudgets
+    )
   }
 
   func failureSnapshot() -> RefreshSnapshot {
@@ -181,8 +219,9 @@ private final class BootstrapRecovery {
     let repository = SwiftDataLedgerRepository(modelContainer: container)
     try AppEnvironment.installProviderDefaultsIfNeeded(in: repository)
     let catalog = try PriceCatalog.bundled()
+    let browserDiscovery = BrowserDiscoveryPreference()
     let adapters: [any ProviderAdapter] = [
-      CursorAdapter(),
+      CursorAdapter(browserDiscovery: browserDiscovery),
       ClaudeAdapter(scanner: ClaudeLogScanner(priceCatalog: catalog)),
       OpenAIAdapter(scanner: CodexLogScanner(priceCatalog: catalog)),
     ]
@@ -195,8 +234,16 @@ private final class BootstrapRecovery {
     return AppRuntime(
       repository: repository,
       coordinator: coordinator,
-      clock: clock
+      clock: clock,
+      browserDiscovery: browserDiscovery
     )
+  }
+
+  private func requiredRuntime() throws -> AppRuntime {
+    if let runtime { return runtime }
+    let runtime = try makeRuntime()
+    self.runtime = runtime
+    return runtime
   }
 }
 
@@ -205,6 +252,7 @@ private struct AppRuntime {
   let repository: SwiftDataLedgerRepository
   let coordinator: RefreshCoordinator
   let clock: LiveClock
+  let browserDiscovery: BrowserDiscoveryPreference
 }
 
 private enum BootstrapError: Error {
