@@ -282,6 +282,30 @@ final class CursorAdapterTests: XCTestCase {
     )
   }
 
+  func testClientRejectsUsagePaginationThatStopsBeforeFinalPage() async throws {
+    let client = CursorUsageClient(http: { request in
+      if request.url!.path.hasSuffix("/spend") {
+        return (
+          Data(
+            #"{"teamMemberSpend":[],"subscriptionCycleStart":1780272000000,"totalMembers":0,"totalPages":1}"#
+              .utf8),
+          response(for: request, status: 200)
+        )
+      }
+      return (
+        Data(
+          #"{"totalUsageEventsCount":0,"pagination":{"numPages":2,"currentPage":1,"pageSize":100,"hasNextPage":false,"hasPreviousPage":false},"usageEvents":[],"period":{"startDate":1780272000000,"endDate":1782864000000}}"#
+            .utf8),
+        response(for: request, status: 200)
+      )
+    })
+
+    await assertProviderThrows(
+      try await client.fetch(window: juneWindow(), adminKey: Secret("admin")),
+      expected: .invalidResponse
+    )
+  }
+
   func testApplicationSessionCancellationIsRethrown() async throws {
     let adapter = CursorAdapter(
       adminCredential: { nil },

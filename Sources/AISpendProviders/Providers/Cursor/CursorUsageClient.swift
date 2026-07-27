@@ -96,6 +96,9 @@ struct CursorUsageClient: Sendable {
         totals[event.model ?? "unknown", default: 0] += cents
       }
       guard decoded.pagination.hasNextPage else {
+        guard decoded.pagination.currentPage >= decoded.pagination.numPages else {
+          throw ProviderClientError.invalidResponse
+        }
         return totals
       }
       guard page < decoded.pagination.numPages else {
