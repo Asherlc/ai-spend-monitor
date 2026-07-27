@@ -130,25 +130,30 @@ public final class AppModel {
   public private(set) var budgets: [BudgetDefinition] = []
   public private(set) var browserDiscoveryEnabled = true
   public private(set) var settingsError: String?
+  public let localDataURL: URL
   public var selectedProvider: ProviderID?
 
   private let refreshAction: RefreshAction
   private let recordLoader: RecordLoader?
   private let settingsActions: AppSettingsActions
   private let now: () -> Date
+  private var refreshGeneration = 0
+  private var refreshTask: Task<RefreshSnapshot, Never>?
 
   public init(
     snapshot: RefreshSnapshot,
     refresh: @escaping RefreshAction,
     records: RecordLoader? = nil,
     settings: AppSettingsActions = .unavailable,
-    now: @escaping () -> Date = Date.init
+    now: @escaping () -> Date = Date.init,
+    storageURL: URL = AppStorageLocation.defaultLedgerURL
   ) {
     self.snapshot = snapshot
     refreshAction = refresh
     recordLoader = records
     settingsActions = settings
     self.now = now
+    localDataURL = storageURL
     browserDiscoveryEnabled = settings.loadBrowserDiscoveryEnabled()
     do {
       budgets = try settings.loadBudgets().sorted(by: Self.budgetOrder)
@@ -170,14 +175,16 @@ public final class AppModel {
     coordinator: RefreshCoordinator,
     records: RecordLoader? = nil,
     settings: AppSettingsActions = .unavailable,
-    now: @escaping () -> Date = Date.init
+    now: @escaping () -> Date = Date.init,
+    storageURL: URL = AppStorageLocation.defaultLedgerURL
   ) {
     self.init(
       snapshot: snapshot,
       refresh: { reason in await coordinator.refresh(reason: reason) },
       records: records,
       settings: settings,
-      now: now
+      now: now,
+      storageURL: storageURL
     )
   }
 
@@ -385,9 +392,14 @@ public final class AppModel {
       return validationFailure("A budget with that amount already exists.")
     }
     let previousBudgets = budgets
+    settingsError = nil
     do {
-      _ = try settingsActions.addBudget(Money(amount), now())
-      try reloadBudgets()
+      let added = try settingsActions.addBudget(Money(amount), now())
+      budgets.append(added)
+      budgets.sort(by: Self.budgetOrder)
+      reloadBudgetsAfterSuccessfulWrite(
+        warning: "The budget was saved, but the latest budget list could not be reloaded."
+      )
       await requestNotificationAuthorization(
         previousBudgets: previousBudgets,
         currentBudgets: budgets
@@ -417,9 +429,18 @@ public final class AppModel {
       return validationFailure("A budget with that amount already exists.")
     }
     let previousBudgets = budgets
+    settingsError = nil
     do {
       try settingsActions.updateBudget(budget)
-      try reloadBudgets()
+      if let index = budgets.firstIndex(where: { $0.id == budget.id }) {
+        budgets[index] = budget
+      } else {
+        budgets.append(budget)
+      }
+      budgets.sort(by: Self.budgetOrder)
+      reloadBudgetsAfterSuccessfulWrite(
+        warning: "The budget was saved, but the latest budget list could not be reloaded."
+      )
       await requestNotificationAuthorization(
         previousBudgets: previousBudgets,
         currentBudgets: budgets
@@ -436,10 +457,13 @@ public final class AppModel {
   }
 
   public func removeBudget(id: UUID) async {
+    settingsError = nil
     do {
       try settingsActions.removeBudget(id)
-      try reloadBudgets()
-      settingsError = nil
+      budgets.removeAll { $0.id == id }
+      reloadBudgetsAfterSuccessfulWrite(
+        warning: "The budget was removed, but the latest budget list could not be reloaded."
+      )
       await performRefresh(reason: .manual)
     } catch {
       settingsError = "The budget could not be removed."
@@ -458,10 +482,16 @@ public final class AppModel {
   }
 
   private func performRefresh(reason: RefreshReason) async {
-    guard !isRefreshing else { return }
+    refreshGeneration += 1
+    let generation = refreshGeneration
+    refreshTask?.cancel()
     isRefreshing = true
-    defer { isRefreshing = false }
-    snapshot = await refreshAction(reason)
+    let refreshAction = refreshAction
+    let task = Task { await refreshAction(reason) }
+    refreshTask = task
+    let refreshedSnapshot = await task.value
+    guard generation == refreshGeneration else { return }
+    snapshot = refreshedSnapshot
     if let recordLoader {
       do {
         records = try recordLoader()
@@ -476,10 +506,20 @@ public final class AppModel {
     {
       self.selectedProvider = nil
     }
+    refreshTask = nil
+    isRefreshing = false
   }
 
   private func reloadBudgets() throws {
     budgets = try settingsActions.loadBudgets().sorted(by: Self.budgetOrder)
+  }
+
+  private func reloadBudgetsAfterSuccessfulWrite(warning: String) {
+    do {
+      try reloadBudgets()
+    } catch {
+      settingsError = warning
+    }
   }
 
   private func requestNotificationAuthorization(
@@ -491,7 +531,6 @@ public final class AppModel {
         previousBudgets,
         currentBudgets
       )
-      settingsError = nil
     } catch {
       settingsError =
         "The budget was saved, but notification permission could not be requested."

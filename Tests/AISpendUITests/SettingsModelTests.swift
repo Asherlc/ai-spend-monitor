@@ -35,6 +35,31 @@ final class SettingsModelTests: XCTestCase {
     XCTAssertNotNil(model.settingsError)
   }
 
+  func testDisablingProviderCancelsInFlightRefreshAndRecalculates() async {
+    let store = SettingsStoreSpy()
+    let refresh = SuspendedRefresh(store: store)
+    let snapshot = Self.makeSnapshot()
+    let model = AppModel(
+      snapshot: snapshot,
+      refresh: refresh.perform,
+      settings: store.actions
+    )
+    let firstRefresh = Task { await model.refresh() }
+    await refresh.waitUntilFirstStarted()
+
+    await model.setProvider(.claude, enabled: false)
+    let observedCancellation = refresh.observedCancellation
+    let reasons = refresh.reasons
+    refresh.releaseFirst()
+    await firstRefresh.value
+
+    XCTAssertTrue(observedCancellation)
+    XCTAssertEqual(reasons, [.manual, .manual])
+    XCTAssertFalse(
+      model.providerSettings.first { $0.id == .claude }?.isEnabled ?? true
+    )
+  }
+
   func testAddsMultipleBudgetsSortedAscending() async {
     let store = SettingsStoreSpy()
     let model = makeModel(store: store)
@@ -80,6 +105,39 @@ final class SettingsModelTests: XCTestCase {
     XCTAssertFalse(store.alertBudgetIDs.contains(budget.id))
   }
 
+  func testSuccessfulBudgetAddRemainsVisibleWhenReloadFails() async {
+    let store = SettingsStoreSpy()
+    let model = makeModel(store: store)
+    store.failBudgetLoad = true
+
+    let result = await model.addBudget(decimalText: "500")
+
+    XCTAssertEqual(result, .success)
+    XCTAssertEqual(model.budgets.map(\.limit), [Money(500)])
+    XCTAssertEqual(store.budgets.map(\.limit), [Money(500)])
+    XCTAssertEqual(
+      model.settingsError,
+      "The budget was saved, but the latest budget list could not be reloaded."
+    )
+  }
+
+  func testSuccessfulBudgetRemovalStaysRemovedWhenReloadFails() async {
+    let store = SettingsStoreSpy()
+    let model = makeModel(store: store)
+    _ = await model.addBudget(decimalText: "500")
+    let budget = try! XCTUnwrap(model.budgets.first)
+    store.failBudgetLoad = true
+
+    await model.removeBudget(id: budget.id)
+
+    XCTAssertTrue(model.budgets.isEmpty)
+    XCTAssertTrue(store.budgets.isEmpty)
+    XCTAssertEqual(
+      model.settingsError,
+      "The budget was removed, but the latest budget list could not be reloaded."
+    )
+  }
+
   func testBrowserDiscoveryTogglePersistsWithoutChangingLocalDiscovery() async {
     let store = SettingsStoreSpy()
     let model = makeModel(store: store)
@@ -109,9 +167,7 @@ final class SettingsModelTests: XCTestCase {
           SourceAttempt(
             strategyID: "claude-actual",
             outcome: .failed(
-              redactedMessage: DiagnosticSanitizer().sanitize(
-                "Authorization: Bearer \(secret)"
-              )
+              redactedMessage: "Authorization: Bearer \(secret)"
             )
           )
         ]
@@ -123,6 +179,19 @@ final class SettingsModelTests: XCTestCase {
 
     XCTAssertFalse(text.contains(secret))
     XCTAssertTrue(text.contains("[REDACTED]"))
+  }
+
+  func testLocalDataLocationUsesInjectedStoreURL() {
+    let snapshot = Self.makeSnapshot()
+    let storeURL = URL(fileURLWithPath: "/tmp/AI Spend/AISpendBar.store")
+
+    let model = AppModel(
+      snapshot: snapshot,
+      refresh: { _ in snapshot },
+      storageURL: storeURL
+    )
+
+    XCTAssertEqual(model.localDataURL, storeURL)
   }
 
   private func makeModel(store: SettingsStoreSpy) -> AppModel {
@@ -147,7 +216,7 @@ final class SettingsModelTests: XCTestCase {
     }
   }
 
-  private static func makeSnapshot(
+  fileprivate static func makeSnapshot(
     states: [ProviderID: StoredProviderState]? = nil,
     attempts: [ProviderID: [SourceAttempt]] = [:]
   ) -> RefreshSnapshot {
@@ -203,12 +272,16 @@ private final class SettingsStoreSpy {
   var browserDiscoveryEnabled = true
   let localDiscoveryEnabled = true
   var failProviderSave = false
+  var failBudgetLoad = false
   var notificationAuthorizationRequests = 0
   var events: [String] = []
 
   var actions: AppSettingsActions {
     AppSettingsActions(
-      loadBudgets: { self.budgets },
+      loadBudgets: {
+        if self.failBudgetLoad { throw SettingsStoreFailure.failed }
+        return self.budgets
+      },
       saveProviderState: { state in
         self.events.append(
           "save-provider:\(state.provider.rawValue):\(state.isEnabled)"
@@ -260,4 +333,70 @@ private final class SettingsStoreSpy {
 
 private enum SettingsStoreFailure: Error {
   case failed
+}
+
+@MainActor
+private final class SuspendedRefresh {
+  private let store: SettingsStoreSpy
+  private var firstStarted = false
+  private var firstStartWaiters: [CheckedContinuation<Void, Never>] = []
+  private var firstContinuation: CheckedContinuation<RefreshSnapshot, Never>?
+  private(set) var observedCancellation = false
+  private(set) var reasons: [RefreshReason] = []
+
+  init(store: SettingsStoreSpy) {
+    self.store = store
+  }
+
+  @MainActor
+  func perform(reason: RefreshReason) async -> RefreshSnapshot {
+    record(reason)
+    if isFirst(reason) {
+      return await withTaskCancellationHandler {
+        await withCheckedContinuation { continuation in
+          install(continuation)
+        }
+      } onCancel: {
+        Task { @MainActor [weak self] in
+          self?.cancelFirst()
+        }
+      }
+    }
+    return SettingsModelTests.makeSnapshot(states: store.providerStates)
+  }
+
+  func waitUntilFirstStarted() async {
+    if firstStarted { return }
+    await withCheckedContinuation { firstStartWaiters.append($0) }
+  }
+
+  func releaseFirst() {
+    firstContinuation?.resume(
+      returning: SettingsModelTests.makeSnapshot(states: store.providerStates)
+    )
+    firstContinuation = nil
+  }
+
+  private func record(_ reason: RefreshReason) {
+    reasons.append(reason)
+  }
+
+  private func isFirst(_ reason: RefreshReason) -> Bool {
+    reasons.count == 1
+  }
+
+  private func install(
+    _ continuation: CheckedContinuation<RefreshSnapshot, Never>
+  ) {
+    firstContinuation = continuation
+    firstStarted = true
+    let waiters = firstStartWaiters
+    firstStartWaiters.removeAll()
+    for waiter in waiters { waiter.resume() }
+  }
+
+  private func cancelFirst() {
+    observedCancellation = true
+    releaseFirst()
+  }
 }

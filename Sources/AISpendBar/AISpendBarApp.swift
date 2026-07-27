@@ -49,7 +49,8 @@ private enum AppEnvironment {
         loadBrowserDiscoveryEnabled: recovery.browserDiscoveryEnabled,
         saveBrowserDiscoveryEnabled: recovery.saveBrowserDiscoveryEnabled,
         requestNotificationAuthorization: recovery.requestNotificationAuthorization
-      )
+      ),
+      storageURL: recovery.storageURL
     )
     Task { await model.launch() }
     return model
@@ -74,6 +75,8 @@ private enum AppEnvironment {
 private final class BootstrapRecovery {
   private var runtime: AppRuntime?
   private let notifications = BudgetNotificationClient()
+  private let browserDiscovery = BrowserDiscoveryPreference()
+  let storageURL = AppStorageLocation.defaultLedgerURL
 
   func prepare() throws -> RefreshSnapshot {
     let runtime = try makeRuntime()
@@ -126,7 +129,7 @@ private final class BootstrapRecovery {
   }
 
   func browserDiscoveryEnabled() -> Bool {
-    runtime?.browserDiscovery.isEnabled ?? true
+    browserDiscovery.isEnabled
   }
 
   func saveBrowserDiscoveryEnabled(_ enabled: Bool) throws {
@@ -209,17 +212,24 @@ private final class BootstrapRecovery {
   }
 
   private func makeRuntime() throws -> AppRuntime {
-    let container = try ModelContainer(
-      for:
-        SpendRecordEntity.self,
+    let schema = Schema([
+      SpendRecordEntity.self,
       ProviderStateEntity.self,
       BudgetEntity.self,
-      BudgetAlertStateEntity.self
+      BudgetAlertStateEntity.self,
+    ])
+    let preparedStorageURL = try AppStorageLocation.prepareLedgerURL()
+    let configuration = ModelConfiguration(
+      schema: schema,
+      url: preparedStorageURL
+    )
+    let container = try ModelContainer(
+      for: schema,
+      configurations: [configuration]
     )
     let repository = SwiftDataLedgerRepository(modelContainer: container)
     try AppEnvironment.installProviderDefaultsIfNeeded(in: repository)
     let catalog = try PriceCatalog.bundled()
-    let browserDiscovery = BrowserDiscoveryPreference()
     let adapters: [any ProviderAdapter] = [
       CursorAdapter(browserDiscovery: browserDiscovery),
       ClaudeAdapter(scanner: ClaudeLogScanner(priceCatalog: catalog)),

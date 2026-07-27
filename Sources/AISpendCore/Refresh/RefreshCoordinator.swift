@@ -213,16 +213,25 @@ public final class RefreshCoordinator {
       case .success(let result):
         let provider = result.provider
         do {
+          let currentStates = try repository.providerStates()
+          guard
+            let current = currentStates[provider],
+            current.isEnabled
+          else {
+            if let current = currentStates[provider] {
+              states[provider] = current
+            }
+            continue
+          }
           try persist(result: result, in: window)
-          let previous = states[provider]
           let sanitizedAttempts = sanitize(result.attempts)
           let failureMessage = firstProblemMessage(in: sanitizedAttempts)
           let state = StoredProviderState(
             provider: provider,
-            isEnabled: previous?.isEnabled ?? true,
+            isEnabled: current.isEnabled,
             lastAttemptAt: now,
             lastSuccessfulAt: result.refreshedSourceIDs.isEmpty
-              ? previous?.lastSuccessfulAt
+              ? current.lastSuccessfulAt
               : now,
             refreshStatus: failureMessage == nil ? .success : .failed,
             lastFailureMessage: failureMessage
@@ -252,9 +261,15 @@ public final class RefreshCoordinator {
       }
     }
 
+    if let currentStates = try? repository.providerStates() {
+      states = currentStates
+    }
+    let currentEnabledProviders = Set(
+      states.values.filter(\.isEnabled).map(\.provider)
+    )
     let snapshot = makeSnapshot(
       window: window,
-      enabledProviders: enabledProviders,
+      enabledProviders: currentEnabledProviders,
       states: states,
       attempts: attempts,
       refreshedAt: now
@@ -346,12 +361,21 @@ public final class RefreshCoordinator {
     attempts: inout [ProviderID: [SourceAttempt]]
   ) {
     let redactedMessage = sanitizer.sanitize(message)
-    let previous = states[provider]
+    let currentStates = try? repository.providerStates()
+    guard
+      let current = currentStates?[provider],
+      current.isEnabled
+    else {
+      if let current = currentStates?[provider] {
+        states[provider] = current
+      }
+      return
+    }
     let state = StoredProviderState(
       provider: provider,
-      isEnabled: previous?.isEnabled ?? true,
+      isEnabled: current.isEnabled,
       lastAttemptAt: now,
-      lastSuccessfulAt: previous?.lastSuccessfulAt,
+      lastSuccessfulAt: current.lastSuccessfulAt,
       refreshStatus: .failed,
       lastFailureMessage: redactedMessage
     )

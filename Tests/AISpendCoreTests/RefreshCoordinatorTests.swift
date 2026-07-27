@@ -28,6 +28,44 @@ final class RefreshCoordinatorTests: XCTestCase {
     XCTAssertEqual(enabledFetchCount, 1)
   }
 
+  func testProviderDisabledDuringFetchCannotPersistLateResultOrReenableIt() async throws {
+    let repository = try makeRepository()
+    try enable([.claude], in: repository)
+    let lateRecord = try record(
+      id: "late-claude",
+      provider: .claude,
+      amount: 9,
+      sourceID: "claude-cost"
+    )
+    let gate = FetchResultGate()
+    let adapter = AdapterSpy(provider: .claude) { window in
+      await gate.suspend(
+        result: Self.fetchResult(
+          provider: .claude,
+          records: [lateRecord],
+          window: window
+        )
+      )
+    }
+    let coordinator = makeCoordinator(
+      adapters: [adapter],
+      repository: repository
+    )
+    let refresh = Task { await coordinator.refresh(reason: .manual) }
+    await gate.waitUntilStarted()
+
+    try repository.saveProviderState(
+      StoredProviderState(provider: .claude, isEnabled: false)
+    )
+    await gate.release()
+    let snapshot = await refresh.value
+
+    XCTAssertFalse(try XCTUnwrap(repository.providerStates()[.claude]).isEnabled)
+    XCTAssertTrue(try repository.records(in: month).isEmpty)
+    XCTAssertTrue(snapshot.summary.providers.isEmpty)
+    XCTAssertFalse(try XCTUnwrap(snapshot.providerStates[.claude]).isEnabled)
+  }
+
   func testEnabledAdaptersRunConcurrently() async throws {
     let repository = try makeRepository()
     try enable([.claude, .openAI], in: repository)
@@ -771,6 +809,33 @@ private actor Rendezvous {
     await withCheckedContinuation { continuation in
       waiters.append(continuation)
     }
+  }
+}
+
+private actor FetchResultGate {
+  private var isStarted = false
+  private var startWaiters: [CheckedContinuation<Void, Never>] = []
+  private var continuation: CheckedContinuation<ProviderFetchResult, Never>?
+  private var result: ProviderFetchResult?
+
+  func waitUntilStarted() async {
+    if isStarted { return }
+    await withCheckedContinuation { startWaiters.append($0) }
+  }
+
+  func suspend(result: ProviderFetchResult) async -> ProviderFetchResult {
+    self.result = result
+    isStarted = true
+    let waiters = startWaiters
+    startWaiters.removeAll()
+    for waiter in waiters { waiter.resume() }
+    return await withCheckedContinuation { continuation = $0 }
+  }
+
+  func release() {
+    guard let result else { return }
+    continuation?.resume(returning: result)
+    continuation = nil
   }
 }
 

@@ -59,7 +59,7 @@ public struct PrivacySettingsView: View {
         Label("No analytics or telemetry", systemImage: "checkmark.shield")
         LabeledContent(
           "Local storage",
-          value: "~/Library/Application Support/AISpendBar"
+          value: model.localDataURL.path(percentEncoded: false)
         )
         Text(
           "Normalized spend, budgets, alert state, and refresh metadata stay on this Mac."
