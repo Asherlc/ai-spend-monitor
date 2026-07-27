@@ -71,12 +71,14 @@ public struct CursorAdapter: ProviderAdapter {
           ),
           try appAttempt(),
         ],
+        refreshedSourceIDs: [],
         fetchedAt: fetchedAt
       )
     }
 
     var records: [SpendRecord] = []
     var attempts: [SourceAttempt] = []
+    var refreshedSourceIDs = Set<String>()
     do {
       if let adminKey = try adminCredential() {
         let result = try await usage(window, adminKey)
@@ -91,6 +93,7 @@ public struct CursorAdapter: ProviderAdapter {
           accountFingerprint: accountFingerprint
         )
         records = normalized.records
+        refreshedSourceIDs.insert("cursor-team-spend")
         attempts.append(
           .init(
             strategyID: "cursor-admin-actual",
@@ -122,6 +125,7 @@ public struct CursorAdapter: ProviderAdapter {
       provider: provider,
       records: records,
       attempts: attempts,
+      refreshedSourceIDs: refreshedSourceIDs,
       fetchedAt: fetchedAt
     )
   }

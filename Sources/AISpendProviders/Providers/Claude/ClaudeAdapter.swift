@@ -54,6 +54,7 @@ public struct ClaudeAdapter: ProviderAdapter {
     let fetchedAt = now()
     var records: [SpendRecord] = []
     var attempts: [SourceAttempt] = []
+    var refreshedSourceIDs = Set<String>()
     var resolvedCredential: ClaudeCredential?
     var modelLessCoverage: [(Date, Date)] = []
     let accountFingerprint: String
@@ -98,6 +99,7 @@ public struct ClaudeAdapter: ProviderAdapter {
           }
           modelLessCoverage = rows.filter { $0.model == nil }.map { ($0.start, $0.end) }
           records.append(contentsOf: actualRecords)
+          refreshedSourceIDs.insert("claude-cost-report")
           attempts.append(
             .init(strategyID: "claude-actual", outcome: .succeeded(recordCount: rows.count)))
         } else {
@@ -130,6 +132,7 @@ public struct ClaudeAdapter: ProviderAdapter {
           try Self.reaccount($0, accountFingerprint: accountFingerprint)
         }
       )
+      refreshedSourceIDs.insert("claude-local-logs")
       attempts.append(
         .init(
           strategyID: "claude-local-estimate",
@@ -147,7 +150,12 @@ public struct ClaudeAdapter: ProviderAdapter {
       )
     }
     return ProviderFetchResult(
-      provider: provider, records: records, attempts: attempts, fetchedAt: fetchedAt)
+      provider: provider,
+      records: records,
+      attempts: attempts,
+      refreshedSourceIDs: refreshedSourceIDs,
+      fetchedAt: fetchedAt
+    )
   }
 
   static func productionCredential(from host: CredentialHost) throws -> ClaudeCredential? {

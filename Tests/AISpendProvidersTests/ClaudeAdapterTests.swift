@@ -68,6 +68,7 @@ final class ClaudeAdapterTests: XCTestCase {
 
     let result = try await adapter.fetch(window: juneWindow())
 
+    XCTAssertEqual(result.refreshedSourceIDs, ["claude-local-logs"])
     XCTAssertEqual(result.records.map(\.amount), [estimated.amount])
     XCTAssertEqual(result.records.map(\.model), [estimated.model])
     XCTAssertNotEqual(result.records.first?.accountFingerprint, "test")
@@ -109,6 +110,10 @@ final class ClaudeAdapterTests: XCTestCase {
     let result = try await adapter.fetch(window: juneWindow())
     let reconciled = SpendReconciler().reconcile(result.records)
 
+    XCTAssertEqual(
+      result.refreshedSourceIDs,
+      ["claude-cost-report", "claude-local-logs"]
+    )
     XCTAssertEqual(Set(result.records.map(\.accountFingerprint)).count, 1)
     XCTAssertFalse(result.records[0].accountFingerprint.contains("admin"))
     XCTAssertEqual(reconciled.included.map(\.quality), [.actual])

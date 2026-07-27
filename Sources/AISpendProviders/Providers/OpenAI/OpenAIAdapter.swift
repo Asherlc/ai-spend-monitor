@@ -54,6 +54,7 @@ public struct OpenAIAdapter: ProviderAdapter {
     let fetchedAt = now()
     var records: [SpendRecord] = []
     var attempts: [SourceAttempt] = []
+    var refreshedSourceIDs = Set<String>()
     var resolvedCredential: Secret?
     var modelLessCoverage: [(Date, Date)] = []
     let accountFingerprint: String
@@ -97,6 +98,7 @@ public struct OpenAIAdapter: ProviderAdapter {
           }
           modelLessCoverage = rows.filter { $0.model == nil }.map { ($0.start, $0.end) }
           records.append(contentsOf: actualRecords)
+          refreshedSourceIDs.insert("openai-organization-costs")
           attempts.append(
             .init(strategyID: "openai-actual", outcome: .succeeded(recordCount: rows.count)))
         } else {
@@ -129,6 +131,7 @@ public struct OpenAIAdapter: ProviderAdapter {
           try Self.reaccount($0, accountFingerprint: accountFingerprint)
         }
       )
+      refreshedSourceIDs.insert("openai-local-logs")
       attempts.append(
         .init(
           strategyID: "openai-local-estimate",
@@ -146,7 +149,12 @@ public struct OpenAIAdapter: ProviderAdapter {
       )
     }
     return ProviderFetchResult(
-      provider: provider, records: records, attempts: attempts, fetchedAt: fetchedAt)
+      provider: provider,
+      records: records,
+      attempts: attempts,
+      refreshedSourceIDs: refreshedSourceIDs,
+      fetchedAt: fetchedAt
+    )
   }
 
   static func productionCredential(from host: CredentialHost) throws -> Secret? {

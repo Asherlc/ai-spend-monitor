@@ -66,6 +66,10 @@ final class OpenAIAdapterTests: XCTestCase {
 
     let result = try await adapter.fetch(window: juneWindow())
 
+    XCTAssertEqual(
+      result.refreshedSourceIDs,
+      ["openai-local-logs", "openai-organization-costs"]
+    )
     XCTAssertEqual(scanCount.value, 1)
     XCTAssertEqual(result.records.first?.amount, Money(2))
     XCTAssertEqual(result.records.first?.quality, .actual)

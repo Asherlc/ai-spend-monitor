@@ -71,6 +71,7 @@ final class CursorAdapterTests: XCTestCase {
 
     let result = try await adapter.fetch(window: juneWindow())
 
+    XCTAssertEqual(result.refreshedSourceIDs, ["cursor-team-spend"])
     XCTAssertEqual(
       Dictionary(uniqueKeysWithValues: result.records.map { ($0.model, $0.amount.amount) }),
       [
@@ -119,6 +120,7 @@ final class CursorAdapterTests: XCTestCase {
 
     let result = try await adapter.fetch(window: juneWindow())
 
+    XCTAssertTrue(result.refreshedSourceIDs.isEmpty)
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertEqual(
       result.attempts,

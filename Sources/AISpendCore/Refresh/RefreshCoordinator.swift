@@ -12,17 +12,20 @@ public struct RefreshSnapshot: Sendable {
   public let summary: MonthlySummary
   public let pacing: PacingResult
   public let attempts: [ProviderID: [SourceAttempt]]
+  public let allDataIsStale: Bool
   public let refreshedAt: Date
 
   public init(
     summary: MonthlySummary,
     pacing: PacingResult,
     attempts: [ProviderID: [SourceAttempt]],
+    allDataIsStale: Bool,
     refreshedAt: Date
   ) {
     self.summary = summary
     self.pacing = pacing
     self.attempts = attempts
+    self.allDataIsStale = allDataIsStale
     self.refreshedAt = refreshedAt
   }
 }
@@ -94,7 +97,15 @@ public final class RefreshCoordinator {
   public func refresh(reason: RefreshReason) async -> RefreshSnapshot {
     lastRefreshReason = reason
     let now = clock.now
-    let initialStates = (try? repository.providerStates()) ?? [:]
+    let initialStates: [ProviderID: StoredProviderState]
+    do {
+      initialStates = try repository.providerStates()
+    } catch {
+      return repositoryFailureSnapshot(
+        at: now,
+        message: "Unable to read provider states"
+      )
+    }
 
     if reason == .popover,
       let lastAttemptAt = initialStates.values.compactMap(\.lastAttemptAt).max(),
@@ -172,17 +183,21 @@ public final class RefreshCoordinator {
         do {
           try persist(result: result, in: window)
           let previous = states[provider]
+          let sanitizedAttempts = sanitize(result.attempts)
+          let failureMessage = firstProblemMessage(in: sanitizedAttempts)
           let state = StoredProviderState(
             provider: provider,
             isEnabled: previous?.isEnabled ?? true,
             lastAttemptAt: now,
-            lastSuccessfulAt: now,
-            refreshStatus: .success,
-            lastFailureMessage: nil
+            lastSuccessfulAt: result.refreshedSourceIDs.isEmpty
+              ? previous?.lastSuccessfulAt
+              : now,
+            refreshStatus: failureMessage == nil ? .success : .failed,
+            lastFailureMessage: failureMessage
           )
           try repository.saveProviderState(state)
           states[provider] = state
-          attempts[provider] = sanitize(result.attempts)
+          attempts[provider] = sanitizedAttempts
         } catch {
           recordFailure(
             provider: provider,
@@ -257,22 +272,15 @@ public final class RefreshCoordinator {
     _ timeout: TimeInterval,
     _ operation: ProviderOperation
   ) async throws -> ProviderFetchResult {
-    try await withThrowingTaskGroup(of: ProviderFetchResult.self) { group in
-      group.addTask {
-        try await operation()
+    let cancellation = ProviderTimeoutCancellation()
+    return try await withTaskCancellationHandler {
+      try await withCheckedThrowingContinuation { continuation in
+        let race = ProviderTimeoutRace(continuation: continuation)
+        cancellation.install(race)
+        race.start(timeout: timeout, operation: operation)
       }
-      group.addTask {
-        try await Task.sleep(for: .seconds(timeout))
-        try Task.checkCancellation()
-        throw ProviderTimeoutError.timedOut
-      }
-      defer {
-        group.cancelAll()
-      }
-      guard let result = try await group.next() else {
-        throw CancellationError()
-      }
-      return result
+    } onCancel: {
+      cancellation.cancel()
     }
   }
 
@@ -283,10 +291,12 @@ public final class RefreshCoordinator {
     guard result.records.allSatisfy({ $0.provider == result.provider }) else {
       throw RefreshCoordinatorError.providerMismatch
     }
-    let sourceIDs = Set(result.records.map(\.sourceID))
-    let reconciled = reconciler.reconcile(result.records)
-    let recordsBySource = Dictionary(grouping: reconciled.included, by: \.sourceID)
-    for sourceID in sourceIDs {
+    let recordSourceIDs = Set(result.records.map(\.sourceID))
+    guard recordSourceIDs.isSubset(of: result.refreshedSourceIDs) else {
+      throw RefreshCoordinatorError.unrefreshedRecordSource
+    }
+    let recordsBySource = Dictionary(grouping: result.records, by: \.sourceID)
+    for sourceID in result.refreshedSourceIDs {
       try repository.replace(
         records: recordsBySource[sourceID, default: []],
         provider: result.provider,
@@ -327,8 +337,10 @@ public final class RefreshCoordinator {
     attempts.map { attempt in
       let outcome: SourceAttempt.Outcome
       switch attempt.outcome {
-      case .succeeded, .unavailable:
+      case .succeeded:
         outcome = attempt.outcome
+      case .unavailable(let reason):
+        outcome = .unavailable(reason: sanitizer.sanitize(reason))
       case .failed(let message):
         outcome = .failed(redactedMessage: sanitizer.sanitize(message))
       }
@@ -340,17 +352,33 @@ public final class RefreshCoordinator {
     window: MonthWindow,
     enabledProviders: Set<ProviderID>,
     states: [ProviderID: StoredProviderState],
-    attempts: [ProviderID: [SourceAttempt]],
+    attempts initialAttempts: [ProviderID: [SourceAttempt]],
     refreshedAt: Date
   ) -> RefreshSnapshot {
-    let records = (try? repository.records(in: window)) ?? []
-    let reconciled = reconciler.reconcile(records).included
+    var attempts = initialAttempts
+    var repositoryReadFailed = false
+    let records: [SpendRecord]
+    do {
+      records = try repository.records(in: window)
+    } catch {
+      records = []
+      repositoryReadFailed = true
+      appendRepositoryFailure(
+        "Unable to read cached spend",
+        enabledProviders: enabledProviders,
+        attempts: &attempts
+      )
+    }
+    let enabledRecords = records.filter {
+      enabledProviders.contains($0.provider)
+    }
+    let reconciled = reconciler.reconcile(enabledRecords).included
     let freshness = Dictionary(
       uniqueKeysWithValues: enabledProviders.map {
         ($0, providerFreshness(for: states[$0], now: clock.now))
       }
     )
-    let summary = aggregator.summarize(
+    let aggregated = aggregator.summarize(
       records: reconciled,
       enabledProviders: enabledProviders,
       window: window,
@@ -359,14 +387,33 @@ public final class RefreshCoordinator {
     let allDataIsStale =
       !enabledProviders.isEmpty
       && enabledProviders.allSatisfy {
-        if case .fresh = freshness[$0] {
-          return false
+        guard let lastSuccessfulAt = states[$0]?.lastSuccessfulAt else {
+          return true
         }
-        return true
+        return clock.now.timeIntervalSince(lastSuccessfulAt) > 30 * 60
       }
+    let budgets: [BudgetDefinition]
+    do {
+      budgets = try repository.budgets()
+    } catch {
+      budgets = []
+      repositoryReadFailed = true
+      appendRepositoryFailure(
+        "Unable to read budgets",
+        enabledProviders: enabledProviders,
+        attempts: &attempts
+      )
+    }
+    let summary = MonthlySummary(
+      total: aggregated.total,
+      actual: aggregated.actual,
+      estimated: aggregated.estimated,
+      providers: aggregated.providers,
+      isPartial: aggregated.isPartial || repositoryReadFailed
+    )
     let pacing = pacingEngine.evaluate(
       spend: summary.total,
-      budgets: (try? repository.budgets()) ?? [],
+      budgets: budgets,
       now: clock.now,
       window: window,
       hasAnyData: !reconciled.isEmpty,
@@ -377,6 +424,7 @@ public final class RefreshCoordinator {
       summary: summary,
       pacing: pacing,
       attempts: attempts,
+      allDataIsStale: allDataIsStale,
       refreshedAt: refreshedAt
     )
   }
@@ -421,8 +469,73 @@ public final class RefreshCoordinator {
       summary: summary,
       pacing: pacing,
       attempts: [:],
+      allDataIsStale: true,
       refreshedAt: now
     )
+  }
+
+  private func repositoryFailureSnapshot(
+    at now: Date,
+    message: String
+  ) -> RefreshSnapshot {
+    let redactedMessage = sanitizer.sanitize(message)
+    let providers = Set(adapters.map(\.provider))
+    let attempts = Dictionary(
+      uniqueKeysWithValues: providers.map {
+        (
+          $0,
+          [
+            SourceAttempt(
+              strategyID: "repository",
+              outcome: .failed(redactedMessage: redactedMessage)
+            )
+          ]
+        )
+      }
+    )
+    let fallback = fallbackSnapshot(at: now)
+    return RefreshSnapshot(
+      summary: fallback.summary,
+      pacing: fallback.pacing,
+      attempts: attempts,
+      allDataIsStale: true,
+      refreshedAt: now
+    )
+  }
+
+  private func firstProblemMessage(
+    in attempts: [SourceAttempt]
+  ) -> String? {
+    for attempt in attempts {
+      switch attempt.outcome {
+      case .succeeded:
+        continue
+      case .unavailable(let reason):
+        return reason
+      case .failed(let message):
+        return message
+      }
+    }
+    return nil
+  }
+
+  private func appendRepositoryFailure(
+    _ message: String,
+    enabledProviders: Set<ProviderID>,
+    attempts: inout [ProviderID: [SourceAttempt]]
+  ) {
+    let providers =
+      enabledProviders.isEmpty
+      ? Set(adapters.map(\.provider))
+      : enabledProviders
+    for provider in providers {
+      attempts[provider, default: []].append(
+        SourceAttempt(
+          strategyID: "repository",
+          outcome: .failed(redactedMessage: sanitizer.sanitize(message))
+        )
+      )
+    }
   }
 }
 
@@ -434,4 +547,116 @@ private enum AdapterOutcome: Sendable {
 
 private enum RefreshCoordinatorError: Error {
   case providerMismatch
+  case unrefreshedRecordSource
+}
+
+private final class ProviderTimeoutCancellation: @unchecked Sendable {
+  private let lock = NSLock()
+  private var race: ProviderTimeoutRace?
+  private var isCancelled = false
+
+  func install(_ race: ProviderTimeoutRace) {
+    lock.lock()
+    if isCancelled {
+      lock.unlock()
+      race.cancel()
+      return
+    }
+    self.race = race
+    lock.unlock()
+  }
+
+  func cancel() {
+    lock.lock()
+    isCancelled = true
+    let race = race
+    lock.unlock()
+    race?.cancel()
+  }
+}
+
+private final class ProviderTimeoutRace: @unchecked Sendable {
+  private enum Winner {
+    case operation
+    case timeout
+  }
+
+  private let lock = NSLock()
+  private var continuation: CheckedContinuation<ProviderFetchResult, any Error>?
+  private var operationTask: Task<Void, Never>?
+  private var timeoutTask: Task<Void, Never>?
+
+  init(
+    continuation: CheckedContinuation<ProviderFetchResult, any Error>
+  ) {
+    self.continuation = continuation
+  }
+
+  func start(
+    timeout: TimeInterval,
+    operation: ProviderOperation
+  ) {
+    let operationTask = Task.detached {
+      do {
+        let value = try await operation()
+        self.resolve(.success(value), winner: .operation)
+      } catch {
+        self.resolve(.failure(error), winner: .operation)
+      }
+    }
+    let timeoutTask = Task.detached {
+      do {
+        try await Task.sleep(for: .seconds(timeout))
+        self.resolve(
+          .failure(ProviderTimeoutError.timedOut),
+          winner: .timeout
+        )
+      } catch is CancellationError {
+        return
+      } catch {
+        self.resolve(.failure(error), winner: .timeout)
+      }
+    }
+
+    lock.lock()
+    self.operationTask = operationTask
+    self.timeoutTask = timeoutTask
+    let didFinish = continuation == nil
+    lock.unlock()
+
+    if didFinish {
+      operationTask.cancel()
+      timeoutTask.cancel()
+    }
+  }
+
+  func cancel() {
+    resolve(.failure(CancellationError()), winner: nil)
+  }
+
+  private func resolve(
+    _ result: Result<ProviderFetchResult, any Error>,
+    winner: Winner?
+  ) {
+    lock.lock()
+    guard let continuation else {
+      lock.unlock()
+      return
+    }
+    self.continuation = nil
+    let operationTask = operationTask
+    let timeoutTask = timeoutTask
+    lock.unlock()
+
+    switch winner {
+    case .operation:
+      timeoutTask?.cancel()
+    case .timeout:
+      operationTask?.cancel()
+    case nil:
+      operationTask?.cancel()
+      timeoutTask?.cancel()
+    }
+    continuation.resume(with: result)
+  }
 }
