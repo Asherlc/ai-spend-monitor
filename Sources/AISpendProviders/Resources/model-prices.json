@@ -4,14 +4,14 @@
   "models": {
     "claude-sonnet-4-5": {
       "inputPerMillion": "3.00",
-      "cacheWritePerMillion": "3.75",
+      "cacheWrite5mPerMillion": "3.75",
+      "cacheWrite1hPerMillion": "6.00",
       "cachedInputPerMillion": "0.30",
       "outputPerMillion": "15.00",
       "sourceURL": "https://platform.claude.com/docs/en/about-claude/pricing"
     },
     "gpt-5.3-codex": {
       "inputPerMillion": "1.75",
-      "cacheWritePerMillion": "1.75",
       "cachedInputPerMillion": "0.175",
       "outputPerMillion": "14.00",
       "sourceURL": "https://developers.openai.com/api/docs/models/gpt-5.3-codex"

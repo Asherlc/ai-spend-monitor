@@ -2,20 +2,53 @@ import Foundation
 
 public struct EstimateMetadata: Codable, Hashable, Sendable {
   public let inputTokens: Int
+  public let cacheCreation5mInputTokens: Int
+  public let cacheCreation1hInputTokens: Int
   public let cachedInputTokens: Int
   public let outputTokens: Int
   public let catalogVersion: String
 
   public init(
     inputTokens: Int,
+    cacheCreation5mInputTokens: Int = 0,
+    cacheCreation1hInputTokens: Int = 0,
     cachedInputTokens: Int,
     outputTokens: Int,
     catalogVersion: String
   ) {
     self.inputTokens = inputTokens
+    self.cacheCreation5mInputTokens = cacheCreation5mInputTokens
+    self.cacheCreation1hInputTokens = cacheCreation1hInputTokens
     self.cachedInputTokens = cachedInputTokens
     self.outputTokens = outputTokens
     self.catalogVersion = catalogVersion
+  }
+
+  private enum CodingKeys: String, CodingKey {
+    case inputTokens
+    case cacheCreation5mInputTokens
+    case cacheCreation1hInputTokens
+    case cachedInputTokens
+    case outputTokens
+    case catalogVersion
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      inputTokens: try container.decode(Int.self, forKey: .inputTokens),
+      cacheCreation5mInputTokens: try container.decodeIfPresent(
+        Int.self,
+        forKey: .cacheCreation5mInputTokens
+      ) ?? 0,
+      cacheCreation1hInputTokens: try container.decodeIfPresent(
+        Int.self,
+        forKey: .cacheCreation1hInputTokens
+      ) ?? 0,
+      cachedInputTokens: try container.decode(Int.self, forKey: .cachedInputTokens),
+      outputTokens: try container.decode(Int.self, forKey: .outputTokens),
+      catalogVersion: try container.decode(String.self, forKey: .catalogVersion)
+    )
   }
 }
 

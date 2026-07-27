@@ -8,7 +8,8 @@ public struct LocalUsage: Hashable, Sendable {
   public let timestamp: Date
   public let model: String
   public let inputTokens: Int
-  public let cacheCreationInputTokens: Int
+  public let cacheCreation5mInputTokens: Int
+  public let cacheCreation1hInputTokens: Int
   public let cachedInputTokens: Int
   public let outputTokens: Int
 
@@ -17,7 +18,8 @@ public struct LocalUsage: Hashable, Sendable {
     timestamp: Date,
     model: String,
     inputTokens: Int,
-    cacheCreationInputTokens: Int = 0,
+    cacheCreation5mInputTokens: Int = 0,
+    cacheCreation1hInputTokens: Int = 0,
     cachedInputTokens: Int,
     outputTokens: Int
   ) {
@@ -25,7 +27,8 @@ public struct LocalUsage: Hashable, Sendable {
     self.timestamp = timestamp
     self.model = model
     self.inputTokens = inputTokens
-    self.cacheCreationInputTokens = cacheCreationInputTokens
+    self.cacheCreation5mInputTokens = cacheCreation5mInputTokens
+    self.cacheCreation1hInputTokens = cacheCreation1hInputTokens
     self.cachedInputTokens = cachedInputTokens
     self.outputTokens = outputTokens
   }
@@ -48,7 +51,7 @@ public struct LocalLogScanResult: Sendable {
 }
 
 struct LocalLogScanner {
-  typealias UsageParser = @Sendable ([String: Any], inout String?) -> LocalUsage?
+  typealias UsageParser = @Sendable ([String: Any], inout LogParseContext) -> LocalUsage?
 
   let provider: ProviderID
   let sessionRoots: [URL]
@@ -58,12 +61,13 @@ struct LocalLogScanner {
 
   func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
     var diagnostics: [LocalLogDiagnostic] = []
-    var usageByID: [String: LocalUsage] = [:]
+    var usageByID: [BilledUsageKey: LocalUsage] = [:]
 
     for file in candidateFiles(window: window, diagnostics: &diagnostics) {
       do {
-        var parserContext: String?
+        var parserContext = LogParseContext(relativePath: relativePath(file.url, to: file.root))
         try scan(file: file.url, relativeTo: file.root) { data, lineNumber in
+          parserContext.lineNumber = lineNumber
           guard
             let object = try? JSONSerialization.jsonObject(with: data),
             let dictionary = object as? [String: Any]
@@ -79,7 +83,8 @@ struct LocalLogScanner {
           else {
             return
           }
-          usageByID[usage.eventID] = usageByID[usage.eventID] ?? usage
+          let key = BilledUsageKey(eventID: usage.eventID, model: usage.model)
+          usageByID[key] = merge(usageByID[key], with: usage)
         }
       } catch {
         diagnostics.append(.sourceUnavailable(file: file.url.lastPathComponent))
@@ -99,7 +104,8 @@ struct LocalLogScanner {
         timestamp: day.start,
         model: day.model,
         inputTokens: usages.reduce(0) { $0 + $1.inputTokens },
-        cacheCreationInputTokens: usages.reduce(0) { $0 + $1.cacheCreationInputTokens },
+        cacheCreation5mInputTokens: usages.reduce(0) { $0 + $1.cacheCreation5mInputTokens },
+        cacheCreation1hInputTokens: usages.reduce(0) { $0 + $1.cacheCreation1hInputTokens },
         cachedInputTokens: usages.reduce(0) { $0 + $1.cachedInputTokens },
         outputTokens: usages.reduce(0) { $0 + $1.outputTokens }
       )
@@ -133,7 +139,9 @@ struct LocalLogScanner {
           observationID: observationID,
           fetchedAt: fetchedAt,
           estimate: EstimateMetadata(
-            inputTokens: aggregate.inputTokens + aggregate.cacheCreationInputTokens,
+            inputTokens: aggregate.inputTokens,
+            cacheCreation5mInputTokens: aggregate.cacheCreation5mInputTokens,
+            cacheCreation1hInputTokens: aggregate.cacheCreation1hInputTokens,
             cachedInputTokens: aggregate.cachedInputTokens,
             outputTokens: aggregate.outputTokens,
             catalogVersion: priceCatalog.version
@@ -182,8 +190,7 @@ struct LocalLogScanner {
         }
         guard values.isRegularFile == true, item.pathExtension == "jsonl",
           let modified = values.contentModificationDate,
-          modified >= window.start,
-          modified < window.end
+          modified >= window.start
         else {
           continue
         }
@@ -222,7 +229,10 @@ struct LocalLogScanner {
     while true {
       let chunk = try handle.read(upToCount: 65_536) ?? Data()
       if chunk.isEmpty {
-        if !buffer.isEmpty && !discardingOversizedLine {
+        if discardingOversizedLine {
+          lineNumber += 1
+          process(Data(), lineNumber)
+        } else if !buffer.isEmpty {
           lineNumber += 1
           process(buffer, lineNumber)
         }
@@ -259,6 +269,46 @@ struct LocalLogScanner {
     let digest = SHA256.hash(data: Data(input.utf8))
     return digest.map { String(format: "%02x", $0) }.joined()
   }
+
+  private func merge(_ existing: LocalUsage?, with incoming: LocalUsage) -> LocalUsage {
+    guard let existing else {
+      return incoming
+    }
+    return LocalUsage(
+      eventID: incoming.eventID,
+      timestamp: max(existing.timestamp, incoming.timestamp),
+      model: incoming.model,
+      inputTokens: max(existing.inputTokens, incoming.inputTokens),
+      cacheCreation5mInputTokens: max(
+        existing.cacheCreation5mInputTokens,
+        incoming.cacheCreation5mInputTokens
+      ),
+      cacheCreation1hInputTokens: max(
+        existing.cacheCreation1hInputTokens,
+        incoming.cacheCreation1hInputTokens
+      ),
+      cachedInputTokens: max(existing.cachedInputTokens, incoming.cachedInputTokens),
+      outputTokens: max(existing.outputTokens, incoming.outputTokens)
+    )
+  }
+
+  private func relativePath(_ file: URL, to root: URL) -> String {
+    let rootComponents = root.standardizedFileURL.pathComponents
+    return file.standardizedFileURL.pathComponents
+      .dropFirst(rootComponents.count)
+      .joined(separator: "/")
+  }
+}
+
+struct LogParseContext {
+  var model: String?
+  let relativePath: String
+  var lineNumber = 0
+}
+
+private struct BilledUsageKey: Hashable {
+  let eventID: String
+  let model: String
 }
 
 private struct UsageDay: Hashable, Comparable {

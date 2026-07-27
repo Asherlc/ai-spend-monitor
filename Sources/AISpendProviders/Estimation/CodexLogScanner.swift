@@ -36,13 +36,13 @@ public struct CodexLogScanner: Sendable {
 
   private static func parse(
     _ object: [String: Any],
-    context: inout String?
+    context: inout LogParseContext
   ) -> LocalUsage? {
     if object["type"] as? String == "turn_context",
       let payload = object["payload"] as? [String: Any],
       let model = payload["model"] as? String
     {
-      context = model
+      context.model = model
       return nil
     }
     guard
@@ -51,7 +51,7 @@ public struct CodexLogScanner: Sendable {
       let timestamp = ISO8601DateFormatter().date(from: timestampValue),
       let payload = object["payload"] as? [String: Any],
       payload["type"] as? String == "token_count",
-      let model = payload["model"] as? String ?? context,
+      let model = payload["model"] as? String ?? context.model,
       let info = payload["info"] as? [String: Any],
       let usage = info["last_token_usage"] as? [String: Any],
       let totalInput = integer(usage["input_tokens"]),
@@ -66,7 +66,12 @@ public struct CodexLogScanner: Sendable {
     let eventID =
       string(in: object, keys: ["event_id", "id"])
       ?? string(in: payload, keys: ["event_id", "id"])
-      ?? "\(timestampValue)|\(model)|\(totalInput)|\(cachedInput)|\(output)"
+      ?? [
+        "position:\(context.relativePath):\(context.lineNumber)",
+        "timestamp:\(timestampValue)",
+        "model:\(model)",
+        "tokens:\(totalInput):\(cachedInput):\(output)",
+      ].joined(separator: "|")
     return LocalUsage(
       eventID: eventID,
       timestamp: timestamp,

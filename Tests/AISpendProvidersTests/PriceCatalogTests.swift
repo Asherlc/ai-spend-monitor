@@ -11,14 +11,15 @@ final class PriceCatalogTests: XCTestCase {
       timestamp: Date(timeIntervalSince1970: 0),
       model: "claude-sonnet-4-5",
       inputTokens: 1_000_000,
-      cacheCreationInputTokens: 100_000,
+      cacheCreation5mInputTokens: 60_000,
+      cacheCreation1hInputTokens: 40_000,
       cachedInputTokens: 200_000,
       outputTokens: 100_000
     )
 
     let amount = try PriceCatalog.bundled().estimate(usage)
 
-    XCTAssertEqual(amount, Money(Decimal(string: "4.935")!))
+    XCTAssertEqual(amount, Money(Decimal(string: "5.025")!))
   }
 
   func testUnknownModelIsUnavailableInsteadOfZeroCost() throws {
@@ -33,6 +34,22 @@ final class PriceCatalogTests: XCTestCase {
 
     XCTAssertThrowsError(try PriceCatalog.bundled().estimate(usage)) {
       XCTAssertEqual($0 as? PriceCatalogError, .unknownModel("unpriced-model"))
+    }
+  }
+
+  func testModelWithoutPublishedCacheWriteRateRejectsCacheWriteUsage() throws {
+    let usage = LocalUsage(
+      eventID: "codex-cache-write",
+      timestamp: Date(timeIntervalSince1970: 0),
+      model: "gpt-5.3-codex",
+      inputTokens: 0,
+      cacheCreation5mInputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 0
+    )
+
+    XCTAssertThrowsError(try PriceCatalog.bundled().estimate(usage)) {
+      XCTAssertEqual($0 as? PriceCatalogError, .invalidUsage)
     }
   }
 }

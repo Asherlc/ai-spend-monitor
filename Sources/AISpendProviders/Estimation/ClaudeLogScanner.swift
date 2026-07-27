@@ -36,11 +36,10 @@ public struct ClaudeLogScanner: Sendable {
 
   private static func parse(
     _ object: [String: Any],
-    context _: inout String?
+    context _: inout LogParseContext
   ) -> LocalUsage? {
     guard
       object["type"] as? String == "assistant",
-      let eventID = string(in: object, keys: ["uuid", "event_id", "id"]),
       let timestampValue = object["timestamp"] as? String,
       let timestamp = ISO8601DateFormatter().date(from: timestampValue),
       let message = object["message"] as? [String: Any],
@@ -51,9 +50,30 @@ public struct ClaudeLogScanner: Sendable {
     else {
       return nil
     }
+    let eventID: String
+    if let requestID = object["requestId"] as? String,
+      let messageID = message["id"] as? String
+    {
+      eventID = "request:\(requestID)|message:\(messageID)"
+    } else if let messageID = message["id"] as? String {
+      eventID = "message:\(messageID)"
+    } else {
+      guard let rowID = string(in: object, keys: ["uuid", "event_id", "id"]) else {
+        return nil
+      }
+      eventID = "row:\(rowID)"
+    }
     let cacheCreation = integer(usage["cache_creation_input_tokens"]) ?? 0
+    let cacheCreationDetails = usage["cache_creation"] as? [String: Any]
+    let cacheCreation5m =
+      integer(cacheCreationDetails?["ephemeral_5m_input_tokens"]) ?? cacheCreation
+    let cacheCreation1h =
+      integer(cacheCreationDetails?["ephemeral_1h_input_tokens"]) ?? 0
     let cacheRead = integer(usage["cache_read_input_tokens"]) ?? 0
-    guard [input, cacheCreation, cacheRead, output].allSatisfy({ $0 >= 0 }) else {
+    guard
+      cacheCreation5m + cacheCreation1h == cacheCreation,
+      [input, cacheCreation5m, cacheCreation1h, cacheRead, output].allSatisfy({ $0 >= 0 })
+    else {
       return nil
     }
     return LocalUsage(
@@ -61,7 +81,8 @@ public struct ClaudeLogScanner: Sendable {
       timestamp: timestamp,
       model: model,
       inputTokens: input,
-      cacheCreationInputTokens: cacheCreation,
+      cacheCreation5mInputTokens: cacheCreation5m,
+      cacheCreation1hInputTokens: cacheCreation1h,
       cachedInputTokens: cacheRead,
       outputTokens: output
     )

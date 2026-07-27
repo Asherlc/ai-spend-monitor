@@ -41,7 +41,8 @@ public struct PriceCatalog: Sendable {
   public func estimate(_ usage: LocalUsage) throws -> Money {
     guard
       usage.inputTokens >= 0,
-      usage.cacheCreationInputTokens >= 0,
+      usage.cacheCreation5mInputTokens >= 0,
+      usage.cacheCreation1hInputTokens >= 0,
       usage.cachedInputTokens >= 0,
       usage.outputTokens >= 0
     else {
@@ -50,10 +51,17 @@ public struct PriceCatalog: Sendable {
     guard let price = models[usage.model] else {
       throw PriceCatalogError.unknownModel(usage.model)
     }
+    guard
+      usage.cacheCreation5mInputTokens == 0 || price.cacheWrite5mPerMillion != nil,
+      usage.cacheCreation1hInputTokens == 0 || price.cacheWrite1hPerMillion != nil
+    else {
+      throw PriceCatalogError.invalidUsage
+    }
     let million = Decimal(1_000_000)
     let amount =
       Decimal(usage.inputTokens) * price.inputPerMillion / million
-      + Decimal(usage.cacheCreationInputTokens) * price.cacheWritePerMillion / million
+      + Decimal(usage.cacheCreation5mInputTokens) * (price.cacheWrite5mPerMillion ?? 0) / million
+      + Decimal(usage.cacheCreation1hInputTokens) * (price.cacheWrite1hPerMillion ?? 0) / million
       + Decimal(usage.cachedInputTokens) * price.cachedInputPerMillion / million
       + Decimal(usage.outputTokens) * price.outputPerMillion / million
     return Money(amount, currency: currency)
@@ -68,13 +76,15 @@ private struct CatalogResource: Decodable {
 
 private struct ModelPrice: Decodable, Sendable {
   let inputPerMillion: Decimal
-  let cacheWritePerMillion: Decimal
+  let cacheWrite5mPerMillion: Decimal?
+  let cacheWrite1hPerMillion: Decimal?
   let cachedInputPerMillion: Decimal
   let outputPerMillion: Decimal
 
   private enum CodingKeys: String, CodingKey {
     case inputPerMillion
-    case cacheWritePerMillion
+    case cacheWrite5mPerMillion
+    case cacheWrite1hPerMillion
     case cachedInputPerMillion
     case outputPerMillion
   }
@@ -82,7 +92,12 @@ private struct ModelPrice: Decodable, Sendable {
   init(from decoder: Decoder) throws {
     let container = try decoder.container(keyedBy: CodingKeys.self)
     inputPerMillion = try container.decimal(forKey: .inputPerMillion)
-    cacheWritePerMillion = try container.decimal(forKey: .cacheWritePerMillion)
+    cacheWrite5mPerMillion =
+      container.contains(.cacheWrite5mPerMillion)
+      ? try container.decimal(forKey: .cacheWrite5mPerMillion) : nil
+    cacheWrite1hPerMillion =
+      container.contains(.cacheWrite1hPerMillion)
+      ? try container.decimal(forKey: .cacheWrite1hPerMillion) : nil
     cachedInputPerMillion = try container.decimal(forKey: .cachedInputPerMillion)
     outputPerMillion = try container.decimal(forKey: .outputPerMillion)
   }

@@ -63,6 +63,38 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertEqual(result.diagnostics, [.unavailableEstimate(model: "future-codex")])
   }
+
+  func testSyntheticEventIdentityUsesStableFilePositionWithoutCollisions() throws {
+    let first = try codexRootWithRepeatedUsage()
+    let second = try codexRootWithRepeatedUsage()
+    defer {
+      try? FileManager.default.removeItem(at: first)
+      try? FileManager.default.removeItem(at: second)
+    }
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+    let catalog = try PriceCatalog.bundled()
+
+    let firstResult = try CodexLogScanner(
+      sessionRoots: [first],
+      priceCatalog: catalog,
+      calendar: calendar
+    ).scan(window: window, fetchedAt: window.end)
+    let secondResult = try CodexLogScanner(
+      sessionRoots: [second],
+      priceCatalog: catalog,
+      calendar: calendar
+    ).scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(firstResult.records.first?.amount, Money(Decimal(string: "5.67")!))
+    XCTAssertEqual(
+      firstResult.records.first?.observationID,
+      secondResult.records.first?.observationID
+    )
+  }
 }
 
 func fixtureRoot(named fixture: String) throws -> URL {
@@ -86,11 +118,29 @@ func emptyRoot() throws -> URL {
   return root
 }
 
-func setModificationDate(_ url: URL) throws {
+func setModificationDate(
+  _ url: URL,
+  to date: Date = isoDate("2026-06-30T00:00:00Z")
+) throws {
   try FileManager.default.setAttributes(
-    [.modificationDate: isoDate("2026-06-30T00:00:00Z")],
+    [.modificationDate: date],
     ofItemAtPath: url.path
   )
+}
+
+private func codexRootWithRepeatedUsage() throws -> URL {
+  let root = try emptyRoot()
+  let file = root.appendingPathComponent("repeated.jsonl")
+  try Data(
+    """
+    {"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"turn_id":"sanitized-turn-1","model":"gpt-5.3-codex"}}
+    {"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000000,"cached_input_tokens":200000,"output_tokens":100000}}}}
+    {"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000000,"cached_input_tokens":200000,"output_tokens":100000}}}}
+
+    """.utf8
+  ).write(to: file)
+  try setModificationDate(file)
+  return root
 }
 
 func utcCalendar() -> Calendar {
