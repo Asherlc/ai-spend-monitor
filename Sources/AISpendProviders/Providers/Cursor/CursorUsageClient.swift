@@ -1,11 +1,6 @@
 import AISpendCore
 import Foundation
 
-enum CursorAuthorization: Sendable {
-  case adminKey(Secret)
-  case appToken(token: Secret, teamID: Secret)
-}
-
 struct CursorUsageResult: Sendable {
   let authoritativeCents: Decimal
   let modelCents: [String: Decimal]
@@ -25,25 +20,29 @@ struct CursorUsageClient: Sendable {
 
   func fetch(
     window: MonthWindow,
-    authorization: CursorAuthorization
+    adminKey: Secret
   ) async throws -> CursorUsageResult {
-    let authoritativeCents = try await fetchSpend(window: window, authorization: authorization)
-    let modelCents = try await fetchUsage(window: window, authorization: authorization)
+    let authoritativeCents = try await fetchSpend(window: window, adminKey: adminKey)
+    let modelCents = try await fetchUsage(window: window, adminKey: adminKey)
     return CursorUsageResult(authoritativeCents: authoritativeCents, modelCents: modelCents)
   }
 
   private func fetchSpend(
     window: MonthWindow,
-    authorization: CursorAuthorization
+    adminKey: Secret
   ) async throws -> Decimal {
     var page = 1
     var total: Decimal = 0
     while true {
+      try Task.checkCancellation()
+      guard page <= 100 else {
+        throw ProviderClientError.invalidResponse
+      }
       let request = try request(
         path: "/teams/spend",
         window: window,
         page: page,
-        authorization: authorization
+        adminKey: adminKey
       )
       let (data, response) = try await http(request)
       guard response.statusCode == 200 else {
@@ -51,6 +50,9 @@ struct CursorUsageClient: Sendable {
       }
       let decoded = try JSONDecoder().decode(CursorSpendPage.self, from: data)
       total += decoded.teamMemberSpend.reduce(0) { $0 + $1.spendCents }
+      guard decoded.totalPages >= page else {
+        throw ProviderClientError.invalidResponse
+      }
       guard page < decoded.totalPages else {
         return total
       }
@@ -60,22 +62,29 @@ struct CursorUsageClient: Sendable {
 
   private func fetchUsage(
     window: MonthWindow,
-    authorization: CursorAuthorization
+    adminKey: Secret
   ) async throws -> [String: Decimal] {
     var page = 1
     var totals: [String: Decimal] = [:]
     while true {
+      try Task.checkCancellation()
+      guard page <= 100 else {
+        throw ProviderClientError.invalidResponse
+      }
       let request = try request(
         path: "/teams/filtered-usage-events",
         window: window,
         page: page,
-        authorization: authorization
+        adminKey: adminKey
       )
       let (data, response) = try await http(request)
       guard response.statusCode == 200 else {
         throw ProviderClientError.httpStatus(response.statusCode)
       }
       let decoded = try JSONDecoder().decode(CursorUsagePage.self, from: data)
+      guard decoded.pagination.currentPage == page else {
+        throw ProviderClientError.invalidResponse
+      }
       for event in decoded.usageEvents
       where event.kind == "Usage-based"
         && event.isTokenBasedCall
@@ -86,10 +95,13 @@ struct CursorUsageClient: Sendable {
         }
         totals[event.model ?? "unknown", default: 0] += cents
       }
-      guard page < decoded.pagination.numPages else {
+      guard decoded.pagination.hasNextPage else {
         return totals
       }
-      page += 1
+      guard page < decoded.pagination.numPages else {
+        throw ProviderClientError.invalidResponse
+      }
+      page = decoded.pagination.currentPage + 1
     }
   }
 
@@ -97,7 +109,7 @@ struct CursorUsageClient: Sendable {
     path: String,
     window: MonthWindow,
     page: Int,
-    authorization: CursorAuthorization
+    adminKey: Secret
   ) throws -> URLRequest {
     let url = URL(string: "https://api.cursor.com\(path)")!
     var request = URLRequest(url: url)
@@ -108,18 +120,9 @@ struct CursorUsageClient: Sendable {
       body["startDate"] = Self.day(window.start)
       body["endDate"] = Self.day(window.end)
     }
-    switch authorization {
-    case .adminKey(let secret):
-      secret.withValue {
-        let encoded = Data("\($0):".utf8).base64EncodedString()
-        request.setValue("Basic \(encoded)", forHTTPHeaderField: "Authorization")
-      }
-    case .appToken(let token, let teamID):
-      token.withValue { request.setValue("Bearer \($0)", forHTTPHeaderField: "Authorization") }
-      teamID.withValue {
-        body["teamId"] = $0
-        request.setValue($0, forHTTPHeaderField: "X-Cursor-Team-Id")
-      }
+    adminKey.withValue {
+      let encoded = Data("\($0):".utf8).base64EncodedString()
+      request.setValue("Basic \(encoded)", forHTTPHeaderField: "Authorization")
     }
     request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
     return request
@@ -179,4 +182,6 @@ private struct CursorTokenUsage: Decodable {
 
 private struct CursorPagination: Decodable {
   let numPages: Int
+  let currentPage: Int
+  let hasNextPage: Bool
 }

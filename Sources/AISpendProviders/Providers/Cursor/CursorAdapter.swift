@@ -4,19 +4,28 @@ import Foundation
 public struct CursorAdapter: ProviderAdapter {
   public let provider = ProviderID.cursor
 
-  private let authorization: @Sendable () throws -> CursorAuthorization?
-  private let usage: @Sendable (MonthWindow, CursorAuthorization) async throws -> CursorUsageResult
+  private let adminCredential: @Sendable () throws -> Secret?
+  private let appSessionAvailable: @Sendable () throws -> Bool
+  private let usage: @Sendable (MonthWindow, Secret) async throws -> CursorUsageResult
+  private let fingerprinter: AccountFingerprinter
+  private let calendar: Calendar
   private let now: @Sendable () -> Date
   private let redactor: Redactor
 
   init(
-    authorization: @escaping @Sendable () throws -> CursorAuthorization?,
-    usage: @escaping @Sendable (MonthWindow, CursorAuthorization) async throws -> CursorUsageResult,
+    adminCredential: @escaping @Sendable () throws -> Secret?,
+    appSessionAvailable: @escaping @Sendable () throws -> Bool,
+    usage: @escaping @Sendable (MonthWindow, Secret) async throws -> CursorUsageResult,
+    fingerprinter: AccountFingerprinter = .production,
+    calendar: Calendar = .current,
     now: @escaping @Sendable () -> Date,
     redactor: Redactor = Redactor()
   ) {
-    self.authorization = authorization
+    self.adminCredential = adminCredential
+    self.appSessionAvailable = appSessionAvailable
     self.usage = usage
+    self.fingerprinter = fingerprinter
+    self.calendar = calendar
     self.now = now
     self.redactor = redactor
   }
@@ -25,124 +34,186 @@ public struct CursorAdapter: ProviderAdapter {
     credentialHost: CredentialHost = CredentialHost(),
     stateReader: CursorStateReader = CursorStateReader(),
     httpClient: HTTPClient = HTTPClient(),
+    calendar: Calendar = .current,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     let client = CursorUsageClient(httpClient: httpClient)
     self.init(
-      authorization: {
-        if let admin = try credentialHost.environmentSecret(named: "CURSOR_ACCESS_TOKEN") {
-          return .adminKey(admin)
-        }
+      adminCredential: {
+        try credentialHost.environmentSecret(named: "CURSOR_ADMIN_API_KEY")
+      },
+      appSessionAvailable: {
         let state = try stateReader.read()
-        if let token = state.accessToken, let teamID = state.teamID {
-          return .appToken(token: token, teamID: teamID)
-        }
-        return nil
+        return state.accessToken != nil && state.teamID != nil
       },
-      usage: { window, authorization in
-        try await client.fetch(window: window, authorization: authorization)
+      usage: { window, adminKey in
+        try await client.fetch(window: window, adminKey: adminKey)
       },
+      fingerprinter: .production,
+      calendar: calendar,
       now: now
     )
   }
 
   public func fetch(window: MonthWindow) async throws -> ProviderFetchResult {
+    try Task.checkCancellation()
     let fetchedAt = now()
-    let resolvedAuthorization: CursorAuthorization?
-    do {
-      resolvedAuthorization = try authorization()
-    } catch SourceHostError.sourceUnavailable {
-      resolvedAuthorization = nil
-    }
-    guard let authorization = resolvedAuthorization else {
+    guard try MonthWindow.current(containing: fetchedAt, calendar: calendar) == window else {
       return ProviderFetchResult(
         provider: provider,
         records: [],
         attempts: [
           .init(
-            strategyID: "cursor-actual",
+            strategyID: "cursor-admin-actual",
             outcome: .unavailable(
-              reason: "No Cursor admin credential or authenticated app state."
+              reason: "Cursor team spend is available only for the current calendar month."
             )
-          )
+          ),
+          try appAttempt(),
         ],
         fetchedAt: fetchedAt
       )
     }
 
+    var records: [SpendRecord] = []
+    var attempts: [SourceAttempt] = []
     do {
-      let result = try await usage(window, authorization)
-      let modelTotal = result.modelCents.values.reduce(0, +)
-      let allocations: [String: Decimal]
-      var attempts: [SourceAttempt]
-      if modelTotal > result.authoritativeCents {
-        allocations = ["unknown": result.authoritativeCents]
-        attempts = [
-          .init(strategyID: "cursor-actual", outcome: .succeeded(recordCount: 1)),
-          .init(
-            strategyID: "cursor-attribution",
-            outcome: .failed(
-              redactedMessage:
-                "Cursor usage schema mismatch: model attribution exceeds authoritative spend."
-            )
-          ),
-        ]
-      } else {
-        var attributed = result.modelCents
-        if modelTotal < result.authoritativeCents {
-          attributed["unknown", default: 0] += result.authoritativeCents - modelTotal
-        }
-        allocations = attributed
-        attempts = [
-          .init(
-            strategyID: "cursor-actual",
-            outcome: .succeeded(recordCount: allocations.count)
-          )
-        ]
-      }
-      let records = try allocations.sorted(by: { $0.key < $1.key }).enumerated().map {
-        index, allocation in
-        try SpendRecord(
-          id: "cursor-actual-\(allocation.key)-\(index)",
-          provider: .cursor,
-          accountFingerprint: "team",
-          model: allocation.key,
-          intervalStart: window.start,
-          intervalEnd: window.end,
-          amount: Money(allocation.value / 100),
-          quality: .actual,
-          sourceID: "cursor-team-spend",
-          observationID: "cursor-spend-\(allocation.key)-\(index)",
+      if let adminKey = try adminCredential() {
+        let result = try await usage(window, adminKey)
+        let accountFingerprint = fingerprinter.fingerprint(
+          identity: adminKey,
+          namespace: "cursor-team"
+        )
+        let normalized = try normalize(
+          result,
+          window: window,
           fetchedAt: fetchedAt,
-          estimate: nil
+          accountFingerprint: accountFingerprint
+        )
+        records = normalized.records
+        attempts.append(
+          .init(
+            strategyID: "cursor-admin-actual",
+            outcome: .succeeded(recordCount: records.count)
+          )
+        )
+        attempts.append(contentsOf: normalized.diagnostics)
+      } else {
+        attempts.append(
+          .init(
+            strategyID: "cursor-admin-actual",
+            outcome: .unavailable(reason: "No Cursor admin credential.")
+          )
         )
       }
-      return ProviderFetchResult(
-        provider: provider,
-        records: records,
-        attempts: attempts,
-        fetchedAt: fetchedAt
-      )
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
-      let message: String
-      if case ProviderClientError.httpStatus(let status) = error,
-        status == 401 || status == 403
-      {
-        message = "Authorization failed (HTTP \(status))."
-      } else {
-        message = redactor.redact(error.localizedDescription)
-      }
-      return ProviderFetchResult(
-        provider: provider,
-        records: [],
-        attempts: [
-          .init(
-            strategyID: "cursor-actual",
-            outcome: .failed(redactedMessage: message)
-          )
-        ],
-        fetchedAt: fetchedAt
+      attempts.append(
+        .init(
+          strategyID: "cursor-admin-actual",
+          outcome: .failed(redactedMessage: message(for: error))
+        )
       )
     }
+
+    attempts.append(try appAttempt())
+    return ProviderFetchResult(
+      provider: provider,
+      records: records,
+      attempts: attempts,
+      fetchedAt: fetchedAt
+    )
+  }
+
+  private func normalize(
+    _ result: CursorUsageResult,
+    window: MonthWindow,
+    fetchedAt: Date,
+    accountFingerprint: String
+  ) throws -> (records: [SpendRecord], diagnostics: [SourceAttempt]) {
+    let modelTotal = result.modelCents.values.reduce(0, +)
+    let allocations: [String: Decimal]
+    let diagnostics: [SourceAttempt]
+    if modelTotal > result.authoritativeCents {
+      allocations = ["unknown": result.authoritativeCents]
+      diagnostics = [
+        .init(
+          strategyID: "cursor-attribution",
+          outcome: .failed(
+            redactedMessage:
+              "Cursor usage schema mismatch: model attribution exceeds authoritative spend."
+          )
+        )
+      ]
+    } else {
+      var attributed = result.modelCents
+      if modelTotal < result.authoritativeCents {
+        attributed["unknown", default: 0] += result.authoritativeCents - modelTotal
+      }
+      allocations = attributed
+      diagnostics = []
+    }
+
+    let records = try allocations.sorted(by: { $0.key < $1.key }).map { allocation in
+      let observationID = stableIdentifier([
+        "cursor-spend",
+        accountFingerprint,
+        String(window.start.timeIntervalSince1970),
+        String(window.end.timeIntervalSince1970),
+        allocation.key,
+      ])
+      return try SpendRecord(
+        id: observationID,
+        provider: .cursor,
+        accountFingerprint: accountFingerprint,
+        model: allocation.key,
+        intervalStart: window.start,
+        intervalEnd: window.end,
+        amount: Money(allocation.value / 100),
+        quality: .actual,
+        sourceID: "cursor-team-spend",
+        observationID: observationID,
+        fetchedAt: fetchedAt,
+        estimate: nil
+      )
+    }
+    return (records, diagnostics)
+  }
+
+  private func appAttempt() throws -> SourceAttempt {
+    try Task.checkCancellation()
+    do {
+      if try appSessionAvailable() {
+        return .init(
+          strategyID: "cursor-app-session",
+          outcome: .unavailable(
+            reason: "No documented Cursor application-session billing endpoint."
+          )
+        )
+      }
+    } catch is CancellationError {
+      throw CancellationError()
+    } catch SourceHostError.sourceUnavailable {
+      // A missing application database is the same as no authenticated session.
+    } catch {
+      return .init(
+        strategyID: "cursor-app-session",
+        outcome: .failed(redactedMessage: redactor.redact(error.localizedDescription))
+      )
+    }
+    return .init(
+      strategyID: "cursor-app-session",
+      outcome: .unavailable(reason: "No authenticated Cursor application session.")
+    )
+  }
+
+  private func message(for error: Error) -> String {
+    if case ProviderClientError.httpStatus(let status) = error,
+      status == 401 || status == 403
+    {
+      return "Authorization failed (HTTP \(status))."
+    }
+    return redactor.redact(error.localizedDescription)
   }
 }

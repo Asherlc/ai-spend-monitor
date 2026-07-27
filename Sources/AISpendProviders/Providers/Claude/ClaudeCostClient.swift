@@ -34,8 +34,19 @@ struct ClaudeCostClient: Sendable {
 
   func fetch(window: MonthWindow, credential: ClaudeCredential) async throws -> [ClaudeCostRow] {
     var page: String?
+    var requestedPages: Set<String> = []
+    var pageCount = 0
     var rows: [ClaudeCostRow] = []
     repeat {
+      try Task.checkCancellation()
+      guard pageCount < 100 else {
+        throw ProviderClientError.invalidResponse
+      }
+      let pageKey = page ?? "<first>"
+      guard requestedPages.insert(pageKey).inserted else {
+        throw ProviderClientError.invalidResponse
+      }
+      pageCount += 1
       let request = try request(window: window, page: page, credential: credential)
       let (data, response) = try await http(request)
       guard response.statusCode == 200 else {
@@ -115,7 +126,7 @@ private struct CostPage: Decodable {
           start: bucket.startingAt,
           end: bucket.endingAt,
           amount: lowestUnits / 100,
-          description: result.description,
+          description: result.description ?? "unknown",
           model: result.model
         )
       }
@@ -152,6 +163,6 @@ private struct CostBucket: Decodable {
 private struct CostResult: Decodable {
   let amount: String
   let currency: String
-  let description: String
+  let description: String?
   let model: String?
 }

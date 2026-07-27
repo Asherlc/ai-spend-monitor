@@ -85,6 +85,29 @@ final class HTTPClientTests: XCTestCase {
     XCTAssertNil(redirected.value(forHTTPHeaderField: "X-Cursor-Team-Id"))
     XCTAssertEqual(redirected.value(forHTTPHeaderField: "Accept"), "safe")
   }
+
+  func testCancellationIsRethrownWithoutWrapping() async throws {
+    TestURLProtocol.state.setMode(.pending)
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [TestURLProtocol.self]
+    let client = HTTPClient(configuration: configuration)
+    let request = URLRequest(url: URL(string: "https://api.openai.com/v1/usage")!)
+    let task = Task { try await client.data(for: request) }
+    for _ in 0..<100 where TestURLProtocol.state.lastRequest == nil {
+      await Task.yield()
+    }
+
+    task.cancel()
+
+    do {
+      _ = try await task.value
+      XCTFail("Expected cancellation")
+    } catch is CancellationError {
+      XCTAssertTrue(true)
+    } catch {
+      XCTFail("Expected CancellationError, got \(error)")
+    }
+  }
 }
 
 private func assertThrowsErrorAsync<T>(
@@ -114,6 +137,9 @@ private final class TestURLProtocol: URLProtocol {
 
   override func startLoading() {
     Self.state.record(request)
+    if case .pending = Self.state.mode {
+      return
+    }
     if case .redirect(let url) = Self.state.mode {
       let response = HTTPURLResponse(
         url: request.url!,
@@ -152,6 +178,7 @@ private final class TestURLProtocolState: @unchecked Sendable {
   enum Mode {
     case success
     case redirect(URL)
+    case pending
   }
 
   private let lock = NSLock()

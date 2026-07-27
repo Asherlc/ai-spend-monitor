@@ -37,7 +37,12 @@ public struct HTTPClient: Sendable {
       return (data, httpResponse)
     } catch let error as SourceHostError {
       throw error
+    } catch is CancellationError {
+      throw CancellationError()
     } catch {
+      if Task.isCancelled {
+        throw CancellationError()
+      }
       throw SourceHostError.requestFailed(
         redactedMessage: redactor.redact(error.localizedDescription)
       )

@@ -60,10 +60,12 @@ struct LocalLogScanner {
   let parser: UsageParser
 
   func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
+    try Task.checkCancellation()
     var diagnostics: [LocalLogDiagnostic] = []
     var usageByID: [BilledUsageKey: LocalUsage] = [:]
 
-    for file in candidateFiles(window: window, diagnostics: &diagnostics) {
+    for file in try candidateFiles(window: window, diagnostics: &diagnostics) {
+      try Task.checkCancellation()
       do {
         var parserContext = LogParseContext(relativePath: relativePath(file.url, to: file.root))
         try scan(file: file.url, relativeTo: file.root) { data, lineNumber in
@@ -86,6 +88,8 @@ struct LocalLogScanner {
           let key = BilledUsageKey(eventID: usage.eventID, model: usage.model)
           usageByID[key] = merge(usageByID[key], with: usage)
         }
+      } catch is CancellationError {
+        throw CancellationError()
       } catch {
         diagnostics.append(.sourceUnavailable(file: file.url.lastPathComponent))
       }
@@ -159,7 +163,7 @@ struct LocalLogScanner {
   private func candidateFiles(
     window: MonthWindow,
     diagnostics: inout [LocalLogDiagnostic]
-  ) -> [(root: URL, url: URL)] {
+  ) throws -> [(root: URL, url: URL)] {
     let keys: [URLResourceKey] = [
       .contentModificationDateKey,
       .isDirectoryKey,
@@ -179,6 +183,7 @@ struct LocalLogScanner {
         continue
       }
       while let item = enumerator.nextObject() as? URL {
+        try Task.checkCancellation()
         guard let values = try? item.resourceValues(forKeys: Set(keys)) else {
           diagnostics.append(.sourceUnavailable(file: item.lastPathComponent))
           enumerator.skipDescendants()
@@ -227,6 +232,7 @@ struct LocalLogScanner {
     let maximumLineBytes = 1_048_576
 
     while true {
+      try Task.checkCancellation()
       let chunk = try handle.read(upToCount: 65_536) ?? Data()
       if chunk.isEmpty {
         if discardingOversizedLine {

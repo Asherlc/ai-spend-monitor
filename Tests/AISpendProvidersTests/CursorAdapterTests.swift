@@ -36,7 +36,7 @@ final class CursorAdapterTests: XCTestCase {
 
     let result = try await client.fetch(
       window: juneWindow(),
-      authorization: .adminKey(Secret("cursor-admin"))
+      adminKey: Secret("cursor-admin")
     )
 
     XCTAssertEqual(result.authoritativeCents, Decimal(string: "600.375")!)
@@ -56,14 +56,17 @@ final class CursorAdapterTests: XCTestCase {
 
   func testAdapterEmitsPositiveUnknownRemainder() async throws {
     let adapter = CursorAdapter(
-      authorization: { .adminKey(Secret("key")) },
+      adminCredential: { Secret("key") },
+      appSessionAvailable: { false },
       usage: { _, _ in
         CursorUsageResult(
           authoritativeCents: 600,
           modelCents: ["claude-sonnet-4-5": 225, "gpt-5": 125]
         )
       },
-      now: { juneWindow().end }
+      fingerprinter: .production,
+      calendar: utcCalendar(),
+      now: { juneDate() }
     )
 
     let result = try await adapter.fetch(window: juneWindow())
@@ -79,18 +82,21 @@ final class CursorAdapterTests: XCTestCase {
 
   func testAdapterUsesAllUnknownAndDiagnosticWhenAttributionExceedsTotal() async throws {
     let adapter = CursorAdapter(
-      authorization: { .appToken(token: Secret("app"), teamID: Secret("team")) },
+      adminCredential: { Secret("admin") },
+      appSessionAvailable: { true },
       usage: { _, _ in
         CursorUsageResult(authoritativeCents: 100, modelCents: ["gpt-5": 125])
       },
-      now: { juneWindow().end }
+      fingerprinter: .production,
+      calendar: utcCalendar(),
+      now: { juneDate() }
     )
 
     let result = try await adapter.fetch(window: juneWindow())
 
     XCTAssertEqual(result.records.map(\.model), ["unknown"])
     XCTAssertEqual(result.records.first?.amount, Money(1))
-    XCTAssertEqual(result.attempts.count, 2)
+    XCTAssertEqual(result.attempts.count, 3)
     guard case .failed(let message) = result.attempts[1].outcome else {
       return XCTFail("Expected schema mismatch diagnostic")
     }
@@ -100,12 +106,15 @@ final class CursorAdapterTests: XCTestCase {
 
   func testAdapterIsUnavailableWithoutAdminOrAuthenticatedAppState() async throws {
     let adapter = CursorAdapter(
-      authorization: { nil },
+      adminCredential: { nil },
+      appSessionAvailable: { false },
       usage: { _, _ in
         XCTFail("Usage must not run")
         return CursorUsageResult(authoritativeCents: 0, modelCents: [:])
       },
-      now: { juneWindow().end }
+      fingerprinter: .production,
+      calendar: utcCalendar(),
+      now: { juneDate() }
     )
 
     let result = try await adapter.fetch(window: juneWindow())
@@ -115,29 +124,181 @@ final class CursorAdapterTests: XCTestCase {
       result.attempts,
       [
         SourceAttempt(
-          strategyID: "cursor-actual",
-          outcome: .unavailable(reason: "No Cursor admin credential or authenticated app state.")
-        )
+          strategyID: "cursor-admin-actual",
+          outcome: .unavailable(reason: "No Cursor admin credential.")
+        ),
+        SourceAttempt(
+          strategyID: "cursor-app-session",
+          outcome: .unavailable(reason: "No authenticated Cursor application session.")
+        ),
       ])
   }
 
   func testAdapterTreatsMissingCursorStateAsUnavailable() async throws {
     let adapter = CursorAdapter(
-      authorization: { throw SourceHostError.sourceUnavailable },
+      adminCredential: { nil },
+      appSessionAvailable: { throw SourceHostError.sourceUnavailable },
       usage: { _, _ in
         XCTFail("Usage must not run")
         return CursorUsageResult(authoritativeCents: 0, modelCents: [:])
       },
-      now: { juneWindow().end }
+      fingerprinter: .production,
+      calendar: utcCalendar(),
+      now: { juneDate() }
     )
 
     let result = try await adapter.fetch(window: juneWindow())
 
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertEqual(
-      result.attempts.first?.outcome,
-      .unavailable(reason: "No Cursor admin credential or authenticated app state.")
+      result.attempts.last?.outcome,
+      .unavailable(reason: "No authenticated Cursor application session.")
     )
+  }
+
+  func testAdminAuthFailureDoesNotMaskIndependentAppStrategy() async throws {
+    let adapter = CursorAdapter(
+      adminCredential: { Secret("admin-secret") },
+      appSessionAvailable: { true },
+      usage: { _, _ in throw ProviderClientError.httpStatus(401) },
+      fingerprinter: .production,
+      calendar: utcCalendar(),
+      now: { juneDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(
+      result.attempts.map(\.strategyID),
+      [
+        "cursor-admin-actual", "cursor-app-session",
+      ])
+    guard case .failed(let adminMessage) = result.attempts[0].outcome else {
+      return XCTFail("Expected admin failure")
+    }
+    XCTAssertFalse(adminMessage.contains("admin-secret"))
+    XCTAssertEqual(
+      result.attempts[1].outcome,
+      .unavailable(reason: "No documented Cursor application-session billing endpoint.")
+    )
+  }
+
+  func testApplicationSessionNeverSendsBearerToAdminEndpoints() async throws {
+    let usageCount = LockedInt()
+    let adapter = CursorAdapter(
+      adminCredential: { nil },
+      appSessionAvailable: { true },
+      usage: { _, _ in
+        usageCount.increment()
+        return CursorUsageResult(authoritativeCents: 1, modelCents: [:])
+      },
+      fingerprinter: .production,
+      calendar: utcCalendar(),
+      now: { juneDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(usageCount.value, 0)
+    XCTAssertTrue(result.records.isEmpty)
+    XCTAssertEqual(
+      result.attempts.last?.outcome,
+      .unavailable(reason: "No documented Cursor application-session billing endpoint.")
+    )
+  }
+
+  func testRejectsNonCurrentMonthBeforeCallingSpendEndpoint() async throws {
+    let usageCount = LockedInt()
+    let adapter = CursorAdapter(
+      adminCredential: { Secret("admin") },
+      appSessionAvailable: { false },
+      usage: { _, _ in
+        usageCount.increment()
+        return CursorUsageResult(authoritativeCents: 1, modelCents: [:])
+      },
+      fingerprinter: .production,
+      calendar: utcCalendar(),
+      now: { julyDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(usageCount.value, 0)
+    XCTAssertEqual(
+      result.attempts.first?.outcome,
+      .unavailable(reason: "Cursor team spend is available only for the current calendar month.")
+    )
+  }
+
+  func testRecordIdentitiesAreStableAndUniqueAcrossTeamsAndMonths() async throws {
+    func fetch(key: String, window: MonthWindow, now: Date) async throws -> SpendRecord {
+      let adapter = CursorAdapter(
+        adminCredential: { Secret(key) },
+        appSessionAvailable: { false },
+        usage: { _, _ in CursorUsageResult(authoritativeCents: 100, modelCents: [:]) },
+        fingerprinter: .production,
+        calendar: utcCalendar(),
+        now: { now }
+      )
+      let result = try await adapter.fetch(window: window)
+      return try XCTUnwrap(result.records.first)
+    }
+
+    let juneTeamA = try await fetch(key: "team-a-secret", window: juneWindow(), now: juneDate())
+    let juneTeamAAgain = try await fetch(
+      key: "team-a-secret", window: juneWindow(), now: juneDate())
+    let juneTeamB = try await fetch(key: "team-b-secret", window: juneWindow(), now: juneDate())
+    let julyTeamA = try await fetch(key: "team-a-secret", window: julyWindow(), now: julyDate())
+
+    XCTAssertEqual(juneTeamA.id, juneTeamAAgain.id)
+    XCTAssertEqual(juneTeamA.observationID, juneTeamAAgain.observationID)
+    XCTAssertNotEqual(juneTeamA.id, juneTeamB.id)
+    XCTAssertNotEqual(juneTeamA.id, julyTeamA.id)
+    XCTAssertNotEqual(juneTeamA.accountFingerprint, juneTeamB.accountFingerprint)
+    XCTAssertFalse(juneTeamA.accountFingerprint.contains("team-a-secret"))
+  }
+
+  func testClientRejectsUsagePaginationWithoutProgress() async throws {
+    let client = CursorUsageClient(http: { request in
+      if request.url!.path.hasSuffix("/spend") {
+        return (
+          Data(
+            #"{"teamMemberSpend":[],"subscriptionCycleStart":1780272000000,"totalMembers":0,"totalPages":1}"#
+              .utf8),
+          response(for: request, status: 200)
+        )
+      }
+      return (
+        Data(
+          #"{"totalUsageEventsCount":0,"pagination":{"numPages":2,"currentPage":1,"pageSize":100,"hasNextPage":true,"hasPreviousPage":false},"usageEvents":[],"period":{"startDate":1780272000000,"endDate":1782864000000}}"#
+            .utf8),
+        response(for: request, status: 200)
+      )
+    })
+
+    await assertProviderThrows(
+      try await client.fetch(window: juneWindow(), adminKey: Secret("admin")),
+      expected: .invalidResponse
+    )
+  }
+
+  func testApplicationSessionCancellationIsRethrown() async throws {
+    let adapter = CursorAdapter(
+      adminCredential: { nil },
+      appSessionAvailable: { throw CancellationError() },
+      usage: { _, _ in CursorUsageResult(authoritativeCents: 0, modelCents: [:]) },
+      calendar: utcCalendar(),
+      now: { juneDate() }
+    )
+
+    do {
+      _ = try await adapter.fetch(window: juneWindow())
+      XCTFail("Expected cancellation")
+    } catch is CancellationError {
+      XCTAssertTrue(true)
+    } catch {
+      XCTFail("Expected CancellationError, got \(error)")
+    }
   }
 }
 
@@ -176,6 +337,21 @@ func juneWindow() -> MonthWindow {
   )
 }
 
+func julyWindow() -> MonthWindow {
+  MonthWindow(
+    start: ISO8601DateFormatter().date(from: "2026-07-01T00:00:00Z")!,
+    end: ISO8601DateFormatter().date(from: "2026-08-01T00:00:00Z")!
+  )
+}
+
+func juneDate() -> Date {
+  ISO8601DateFormatter().date(from: "2026-06-15T00:00:00Z")!
+}
+
+func julyDate() -> Date {
+  ISO8601DateFormatter().date(from: "2026-07-15T00:00:00Z")!
+}
+
 func response(for request: URLRequest, status: Int) -> HTTPURLResponse {
   HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!
 }
@@ -185,15 +361,17 @@ func makeSpendRecord(
   model: String,
   amount: Decimal,
   quality: SpendQuality,
-  accountFingerprint: String = "test"
+  accountFingerprint: String = "test",
+  intervalStart: Date = juneWindow().start,
+  intervalEnd: Date = juneWindow().end
 ) throws -> SpendRecord {
   try SpendRecord(
     id: UUID().uuidString,
     provider: provider,
     accountFingerprint: accountFingerprint,
     model: model,
-    intervalStart: juneWindow().start,
-    intervalEnd: juneWindow().end,
+    intervalStart: intervalStart,
+    intervalEnd: intervalEnd,
     amount: Money(amount),
     quality: quality,
     sourceID: "test",
@@ -201,4 +379,18 @@ func makeSpendRecord(
     fetchedAt: juneWindow().end,
     estimate: nil
   )
+}
+
+func assertProviderThrows<T>(
+  _ expression: @autoclosure () async throws -> T,
+  expected: ProviderClientError,
+  file: StaticString = #filePath,
+  line: UInt = #line
+) async {
+  do {
+    _ = try await expression()
+    XCTFail("Expected provider client error", file: file, line: line)
+  } catch {
+    XCTAssertEqual(error as? ProviderClientError, expected, file: file, line: line)
+  }
 }

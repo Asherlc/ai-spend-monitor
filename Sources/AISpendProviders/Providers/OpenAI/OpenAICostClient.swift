@@ -5,7 +5,7 @@ struct OpenAICostRow: Sendable {
   let start: Date
   let end: Date
   let amount: Decimal
-  let model: String
+  let model: String?
   let projectID: String?
   let lineItem: String?
 }
@@ -24,8 +24,19 @@ struct OpenAICostClient: Sendable {
 
   func fetch(window: MonthWindow, credential: Secret) async throws -> [OpenAICostRow] {
     var page: String?
+    var requestedPages: Set<String> = []
+    var pageCount = 0
     var rows: [OpenAICostRow] = []
     repeat {
+      try Task.checkCancellation()
+      guard pageCount < 100 else {
+        throw ProviderClientError.invalidResponse
+      }
+      let pageKey = page ?? "<first>"
+      guard requestedPages.insert(pageKey).inserted else {
+        throw ProviderClientError.invalidResponse
+      }
+      pageCount += 1
       let request = try request(window: window, page: page, credential: credential)
       let (data, response) = try await http(request)
       guard response.statusCode == 200 else {
@@ -79,14 +90,14 @@ private struct OpenAIPage: Decodable {
   var rows: [OpenAICostRow] {
     data.flatMap { bucket in
       bucket.results.compactMap { result in
-        guard result.amount.currency.uppercased() == "USD" else {
+        guard let amount = result.amount, amount.currency.uppercased() == "USD" else {
           return nil
         }
         return OpenAICostRow(
           start: Date(timeIntervalSince1970: TimeInterval(bucket.startTime)),
           end: Date(timeIntervalSince1970: TimeInterval(bucket.endTime)),
-          amount: result.amount.value,
-          model: result.model ?? result.lineItem ?? "unknown",
+          amount: amount.value,
+          model: result.model,
           projectID: result.projectID,
           lineItem: result.lineItem
         )
@@ -108,7 +119,7 @@ private struct OpenAIBucket: Decodable {
 }
 
 private struct OpenAIResult: Decodable {
-  let amount: DecimalAmount
+  let amount: DecimalAmount?
   let lineItem: String?
   let projectID: String?
   let model: String?
@@ -118,6 +129,14 @@ private struct OpenAIResult: Decodable {
     case lineItem = "line_item"
     case projectID = "project_id"
     case model
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    amount = try? container.decodeIfPresent(DecimalAmount.self, forKey: .amount)
+    lineItem = try container.decodeIfPresent(String.self, forKey: .lineItem)
+    projectID = try container.decodeIfPresent(String.self, forKey: .projectID)
+    model = try container.decodeIfPresent(String.self, forKey: .model)
   }
 }
 
