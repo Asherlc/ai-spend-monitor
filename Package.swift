@@ -20,6 +20,11 @@ let package = Package(
       resources: [.process("Resources")]
     ),
     .testTarget(name: "AISpendCoreTests", dependencies: ["AISpendCore"]),
+    .testTarget(
+      name: "AISpendProvidersTests",
+      dependencies: ["AISpendCore", "AISpendProviders"],
+      resources: [.copy("Fixtures")]
+    ),
   ],
   swiftLanguageModes: [.v6]
 )
