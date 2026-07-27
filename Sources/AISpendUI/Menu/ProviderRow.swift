@@ -2,21 +2,22 @@ import AISpendCore
 import SwiftUI
 
 public struct ProviderRow: View {
-  private let provider: ProviderSpendSummary
+  private let presentation: ProviderPresentation
   private let combinedTotal: Money
   private let action: () -> Void
 
   public init(
-    provider: ProviderSpendSummary,
+    presentation: ProviderPresentation,
     combinedTotal: Money,
     action: @escaping () -> Void
   ) {
-    self.provider = provider
+    self.presentation = presentation
     self.combinedTotal = combinedTotal
     self.action = action
   }
 
   public var body: some View {
+    let provider = presentation.summary
     Button(action: action) {
       HStack(spacing: 10) {
         Image(systemName: provider.id.symbolName)
@@ -25,14 +26,20 @@ public struct ProviderRow: View {
         VStack(alignment: .leading, spacing: 2) {
           Text(provider.id.displayName)
             .foregroundStyle(.primary)
-          Text(share)
+          Text(statusLine)
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(statusColor)
         }
         Spacer()
         VStack(alignment: .trailing, spacing: 2) {
-          Text(SpendFormatting.currency(provider.total))
-            .font(.callout.monospacedDigit().weight(.medium))
+          if provider.total.amount > 0 {
+            Text(SpendFormatting.currency(provider.total))
+              .font(.callout.monospacedDigit().weight(.medium))
+          } else {
+            Text("No data")
+              .font(.callout)
+              .foregroundStyle(.secondary)
+          }
           if provider.estimated.amount > 0 {
             Text("\(SpendFormatting.estimated(provider.estimated)) estimated")
               .font(.caption2)
@@ -53,8 +60,34 @@ public struct ProviderRow: View {
   }
 
   private var share: String {
+    let provider = presentation.summary
     guard combinedTotal.amount > 0 else { return "0% of total" }
     return "\(SpendFormatting.share(provider.total.amount / combinedTotal.amount)) of total"
+  }
+
+  private var statusLine: String {
+    switch presentation.status.freshness {
+    case .fresh:
+      share
+    case .stale(let age):
+      "Stale · \(ageText(age))"
+    case .cachedAfterFailure(let age, _):
+      "Cached · \(ageText(age))"
+    case .unavailable:
+      "Unavailable"
+    }
+  }
+
+  private var statusColor: Color {
+    switch presentation.status.freshness {
+    case .fresh: .secondary
+    case .stale, .cachedAfterFailure, .unavailable: .orange
+    }
+  }
+
+  private func ageText(_ age: TimeInterval) -> String {
+    let minutes = max(1, Int(age / 60))
+    return minutes < 60 ? "\(minutes)m old" : "\(minutes / 60)h old"
   }
 }
 

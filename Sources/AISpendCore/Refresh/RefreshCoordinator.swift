@@ -14,19 +14,34 @@ public struct RefreshSnapshot: Sendable {
   public let attempts: [ProviderID: [SourceAttempt]]
   public let allDataIsStale: Bool
   public let refreshedAt: Date
+  public let evaluatedAt: Date
+  public let monthWindow: MonthWindow
+  public let providerStates: [ProviderID: StoredProviderState]
+  public let hasCurrentMonthData: Bool
 
   public init(
     summary: MonthlySummary,
     pacing: PacingResult,
     attempts: [ProviderID: [SourceAttempt]],
     allDataIsStale: Bool,
-    refreshedAt: Date
+    refreshedAt: Date,
+    evaluatedAt: Date? = nil,
+    monthWindow: MonthWindow? = nil,
+    providerStates: [ProviderID: StoredProviderState] = [:],
+    hasCurrentMonthData: Bool? = nil
   ) {
     self.summary = summary
     self.pacing = pacing
     self.attempts = attempts
     self.allDataIsStale = allDataIsStale
     self.refreshedAt = refreshedAt
+    self.evaluatedAt = evaluatedAt ?? refreshedAt
+    self.monthWindow =
+      monthWindow
+      ?? (try? MonthWindow.current(containing: refreshedAt, calendar: .current))
+      ?? MonthWindow(start: refreshedAt, end: refreshedAt.addingTimeInterval(1))
+    self.providerStates = providerStates
+    self.hasCurrentMonthData = hasCurrentMonthData ?? !summary.providers.isEmpty
   }
 }
 
@@ -425,7 +440,11 @@ public final class RefreshCoordinator {
       pacing: pacing,
       attempts: attempts,
       allDataIsStale: allDataIsStale,
-      refreshedAt: refreshedAt
+      refreshedAt: refreshedAt,
+      evaluatedAt: clock.now,
+      monthWindow: window,
+      providerStates: states,
+      hasCurrentMonthData: !reconciled.isEmpty
     )
   }
 
@@ -449,6 +468,9 @@ public final class RefreshCoordinator {
   }
 
   private func fallbackSnapshot(at now: Date) -> RefreshSnapshot {
+    let window =
+      (try? MonthWindow.current(containing: now, calendar: calendar))
+      ?? MonthWindow(start: now, end: now.addingTimeInterval(1))
     let summary = MonthlySummary(
       total: .zero,
       actual: .zero,
@@ -460,7 +482,7 @@ public final class RefreshCoordinator {
       spend: .zero,
       budgets: [],
       now: now,
-      window: MonthWindow(start: now, end: now.addingTimeInterval(1)),
+      window: window,
       hasAnyData: false,
       allDataIsStale: true,
       isPartial: true
@@ -470,7 +492,11 @@ public final class RefreshCoordinator {
       pacing: pacing,
       attempts: [:],
       allDataIsStale: true,
-      refreshedAt: now
+      refreshedAt: now,
+      evaluatedAt: now,
+      monthWindow: window,
+      providerStates: [:],
+      hasCurrentMonthData: false
     )
   }
 
@@ -480,6 +506,20 @@ public final class RefreshCoordinator {
   ) -> RefreshSnapshot {
     let redactedMessage = sanitizer.sanitize(message)
     let providers = Set(adapters.map(\.provider))
+    let states = Dictionary(
+      uniqueKeysWithValues: providers.map {
+        (
+          $0,
+          StoredProviderState(
+            provider: $0,
+            isEnabled: true,
+            lastAttemptAt: now,
+            refreshStatus: .failed,
+            lastFailureMessage: redactedMessage
+          )
+        )
+      }
+    )
     let attempts = Dictionary(
       uniqueKeysWithValues: providers.map {
         (
@@ -499,7 +539,11 @@ public final class RefreshCoordinator {
       pacing: fallback.pacing,
       attempts: attempts,
       allDataIsStale: true,
-      refreshedAt: now
+      refreshedAt: now,
+      evaluatedAt: now,
+      monthWindow: fallback.monthWindow,
+      providerStates: states,
+      hasCurrentMonthData: false
     )
   }
 

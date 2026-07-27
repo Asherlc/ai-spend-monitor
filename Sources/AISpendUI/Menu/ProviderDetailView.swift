@@ -4,11 +4,12 @@ import SwiftUI
 
 public struct ProviderDetailView: View {
   @Bindable private var model: AppModel
-  private let provider: ProviderSpendSummary
+  private let presentation: ProviderPresentation
+  private var provider: ProviderSpendSummary { presentation.summary }
 
-  public init(model: AppModel, provider: ProviderSpendSummary) {
+  public init(model: AppModel, presentation: ProviderPresentation) {
     self.model = model
-    self.provider = provider
+    self.presentation = presentation
   }
 
   public var body: some View {
@@ -116,9 +117,13 @@ public struct ProviderDetailView: View {
         .font(.headline)
       if points.isEmpty {
         ContentUnavailableView(
-          "No daily history",
+          model.dailyHistoryUnavailable ? "Daily history unavailable" : "No daily history",
           systemImage: "chart.xyaxis.line",
-          description: Text("The active source did not return daily records.")
+          description: Text(
+            model.dailyHistoryUnavailable
+              ? "The local ledger could not be read. Refresh to retry."
+              : "The active source did not return daily records."
+          )
         )
         .frame(height: 90)
       } else {
@@ -146,11 +151,7 @@ public struct ProviderDetailView: View {
     VStack(alignment: .leading, spacing: 8) {
       Text("Sources & diagnostics")
         .font(.headline)
-      Text(
-        "Last refreshed \(SpendFormatting.relative(model.snapshot.refreshedAt))"
-      )
-      .font(.caption)
-      .foregroundStyle(.secondary)
+      providerTiming
       if model.attempts(for: provider.id).isEmpty {
         Text("No source diagnostics reported.")
           .font(.caption)
@@ -175,6 +176,48 @@ public struct ProviderDetailView: View {
         }
       }
     }
+  }
+
+  @ViewBuilder
+  private var providerTiming: some View {
+    if let attempt = presentation.status.lastAttemptAt {
+      Text("Last attempt \(SpendFormatting.relative(attempt))")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    if let success = presentation.status.lastSuccessfulAt {
+      Text("Last success \(SpendFormatting.relative(success))")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+    Text(freshnessText)
+      .font(.caption.weight(.medium))
+      .foregroundStyle(freshnessColor)
+  }
+
+  private var freshnessText: String {
+    switch presentation.status.freshness {
+    case .fresh:
+      "Fresh"
+    case .stale(let age):
+      "Stale cache · \(ageText(age)) old"
+    case .cachedAfterFailure(let age, let message):
+      "Cached after failed refresh · \(ageText(age)) old · \(message)"
+    case .unavailable(let message):
+      "Unavailable · \(message)"
+    }
+  }
+
+  private var freshnessColor: Color {
+    switch presentation.status.freshness {
+    case .fresh: .green
+    case .stale, .cachedAfterFailure, .unavailable: .orange
+    }
+  }
+
+  private func ageText(_ age: TimeInterval) -> String {
+    let minutes = max(1, Int(age / 60))
+    return minutes < 60 ? "\(minutes)m" : "\(minutes / 60)h"
   }
 
   private func modelShare(_ item: ModelSpendSummary) -> String {

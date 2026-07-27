@@ -14,6 +14,33 @@ public struct DailySpendPoint: Identifiable, Hashable, Sendable {
   }
 }
 
+public enum SpendAvailability: Hashable, Sendable {
+  case available
+  case collecting
+  case unavailable
+}
+
+public enum ProviderFreshnessStatus: Hashable, Sendable {
+  case fresh
+  case stale(age: TimeInterval)
+  case cachedAfterFailure(age: TimeInterval, message: String)
+  case unavailable(message: String)
+}
+
+public struct ProviderStatus: Hashable, Sendable {
+  public let lastAttemptAt: Date?
+  public let lastSuccessfulAt: Date?
+  public let freshness: ProviderFreshnessStatus
+}
+
+public struct ProviderPresentation: Identifiable, Hashable, Sendable {
+  public let summary: ProviderSpendSummary
+  public let status: ProviderStatus
+  public let attempts: [SourceAttempt]
+
+  public var id: ProviderID { summary.id }
+}
+
 @MainActor
 @Observable
 public final class AppModel {
@@ -25,6 +52,7 @@ public final class AppModel {
   public private(set) var snapshot: RefreshSnapshot
   public private(set) var isRefreshing = false
   public private(set) var records: [SpendRecord] = []
+  public private(set) var dailyHistoryUnavailable = false
   public var selectedProvider: ProviderID?
 
   private let refreshAction: RefreshAction
@@ -38,7 +66,14 @@ public final class AppModel {
     self.snapshot = snapshot
     refreshAction = refresh
     recordLoader = records
-    self.records = (try? records?()) ?? []
+    if let records {
+      do {
+        self.records = try records()
+      } catch {
+        self.records = []
+        dailyHistoryUnavailable = true
+      }
+    }
   }
 
   public convenience init(
@@ -66,11 +101,26 @@ public final class AppModel {
   }
 
   public var statusTitle: String {
+    guard availability != .unavailable else { return "No data" }
     let amount = SpendFormatting.menuBar(snapshot.summary.total)
     return needsAttention ? "\(amount) !" : amount
   }
 
+  public var headlineTitle: String {
+    availability == .unavailable
+      ? "No current data"
+      : SpendFormatting.currency(snapshot.summary.total)
+  }
+
+  public var availability: SpendAvailability {
+    guard snapshot.hasCurrentMonthData else { return .unavailable }
+    return snapshot.pacing.isCollecting ? .collecting : .available
+  }
+
   public var statusSymbol: String {
+    if availability == .unavailable {
+      return "questionmark.circle"
+    }
     if snapshot.allDataIsStale {
       return "exclamationmark.triangle.fill"
     }
@@ -85,7 +135,7 @@ public final class AppModel {
   }
 
   public var monthTitle: String {
-    SpendFormatting.month(snapshot.refreshedAt)
+    SpendFormatting.month(snapshot.monthWindow.start)
   }
 
   public var budgetEvaluations: [BudgetEvaluation] {
@@ -99,9 +149,43 @@ public final class AppModel {
     }
   }
 
+  public var providerRows: [ProviderPresentation] {
+    let summaries = Dictionary(
+      uniqueKeysWithValues: providerSummaries.map { ($0.id, $0) }
+    )
+    let enabledProviders: Set<ProviderID>
+    if snapshot.providerStates.isEmpty {
+      enabledProviders = Set(summaries.keys)
+    } else {
+      enabledProviders = Set(
+        snapshot.providerStates.values.filter(\.isEnabled).map(\.provider)
+      )
+    }
+    return enabledProviders.map { provider in
+      ProviderPresentation(
+        summary: summaries[provider] ?? Self.emptySummary(provider: provider),
+        status: providerStatus(
+          state: snapshot.providerStates[provider],
+          attempts: snapshot.attempts[provider] ?? []
+        ),
+        attempts: snapshot.attempts[provider] ?? []
+      )
+    }.sorted {
+      if $0.summary.total != $1.summary.total {
+        return $0.summary.total > $1.summary.total
+      }
+      return $0.id.rawValue < $1.id.rawValue
+    }
+  }
+
   public var selectedProviderSummary: ProviderSpendSummary? {
     guard let selectedProvider else { return nil }
-    return providerSummaries.first { $0.id == selectedProvider }
+    return providerRows.first { $0.id == selectedProvider }?.summary
+  }
+
+  public var selectedProviderPresentation: ProviderPresentation? {
+    guard let selectedProvider else { return nil }
+    return providerRows.first { $0.id == selectedProvider }
   }
 
   public func providerShare(_ provider: ProviderSpendSummary) -> Decimal {
@@ -134,12 +218,84 @@ public final class AppModel {
     defer { isRefreshing = false }
     snapshot = await refreshAction(reason)
     if let recordLoader {
-      records = (try? recordLoader()) ?? records
+      do {
+        records = try recordLoader()
+        dailyHistoryUnavailable = false
+      } catch {
+        records = []
+        dailyHistoryUnavailable = true
+      }
     }
     if let selectedProvider,
-      !snapshot.summary.providers.contains(where: { $0.id == selectedProvider })
+      !providerRows.contains(where: { $0.id == selectedProvider })
     {
       self.selectedProvider = nil
     }
+  }
+
+  private func providerStatus(
+    state: StoredProviderState?,
+    attempts: [SourceAttempt]
+  ) -> ProviderStatus {
+    guard let state else {
+      let message = firstProblem(in: attempts) ?? "Provider has not refreshed"
+      return ProviderStatus(
+        lastAttemptAt: nil,
+        lastSuccessfulAt: nil,
+        freshness: .unavailable(message: message)
+      )
+    }
+    let failure = state.lastFailureMessage ?? firstProblem(in: attempts)
+    if state.refreshStatus == .failed {
+      if let success = state.lastSuccessfulAt {
+        return ProviderStatus(
+          lastAttemptAt: state.lastAttemptAt,
+          lastSuccessfulAt: success,
+          freshness: .cachedAfterFailure(
+            age: max(0, snapshot.evaluatedAt.timeIntervalSince(success)),
+            message: failure ?? "Provider refresh failed"
+          )
+        )
+      }
+      return ProviderStatus(
+        lastAttemptAt: state.lastAttemptAt,
+        lastSuccessfulAt: nil,
+        freshness: .unavailable(message: failure ?? "Provider refresh failed")
+      )
+    }
+    guard let success = state.lastSuccessfulAt else {
+      return ProviderStatus(
+        lastAttemptAt: state.lastAttemptAt,
+        lastSuccessfulAt: nil,
+        freshness: .unavailable(message: "Provider has not refreshed")
+      )
+    }
+    let age = max(0, snapshot.evaluatedAt.timeIntervalSince(success))
+    return ProviderStatus(
+      lastAttemptAt: state.lastAttemptAt,
+      lastSuccessfulAt: success,
+      freshness: age > 30 * 60 ? .stale(age: age) : .fresh
+    )
+  }
+
+  private func firstProblem(in attempts: [SourceAttempt]) -> String? {
+    attempts.lazy.compactMap { attempt in
+      switch attempt.outcome {
+      case .succeeded: nil
+      case .unavailable(let reason): reason
+      case .failed(let message): message
+      }
+    }.first
+  }
+
+  private static func emptySummary(
+    provider: ProviderID
+  ) -> ProviderSpendSummary {
+    ProviderSpendSummary(
+      id: provider,
+      actual: .zero,
+      estimated: .zero,
+      models: []
+    )
   }
 }

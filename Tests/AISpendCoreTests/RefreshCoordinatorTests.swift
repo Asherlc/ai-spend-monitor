@@ -163,6 +163,31 @@ final class RefreshCoordinatorTests: XCTestCase {
     let fetchCount = await adapter.fetchCount
     XCTAssertEqual(fetchCount, 0)
     XCTAssertEqual(snapshot.refreshedAt, now.addingTimeInterval(-59))
+    XCTAssertEqual(snapshot.monthWindow, month)
+    XCTAssertEqual(
+      snapshot.providerStates[.claude]?.lastSuccessfulAt,
+      now.addingTimeInterval(-59)
+    )
+  }
+
+  func testCachedSnapshotUsesCurrentMonthWindowAfterRollover() throws {
+    let repository = try makeRepository()
+    let previousMonthAttempt = month.start.addingTimeInterval(-60)
+    try repository.saveProviderState(
+      StoredProviderState(
+        provider: .claude,
+        isEnabled: true,
+        lastAttemptAt: previousMonthAttempt,
+        lastSuccessfulAt: previousMonthAttempt,
+        refreshStatus: .success
+      )
+    )
+    let coordinator = makeCoordinator(adapters: [], repository: repository)
+
+    let snapshot = try coordinator.cachedSnapshot()
+
+    XCTAssertEqual(snapshot.refreshedAt, previousMonthAttempt)
+    XCTAssertEqual(snapshot.monthWindow, month)
   }
 
   func testFreshnessGuardOnlyAppliesToPopoverReason() async throws {
@@ -416,6 +441,12 @@ final class RefreshCoordinatorTests: XCTestCase {
 
     XCTAssertTrue(snapshot.summary.isPartial)
     XCTAssertTrue(snapshot.allDataIsStale)
+    XCTAssertEqual(
+      snapshot.providerStates[.claude]?.lastSuccessfulAt,
+      now.addingTimeInterval(-1_801)
+    )
+    XCTAssertEqual(snapshot.providerStates[.claude]?.lastAttemptAt, now)
+    XCTAssertEqual(snapshot.providerStates[.claude]?.refreshStatus, .failed)
   }
 
   func testDisabledOnlyCacheLeavesPacingWithoutData() async throws {
@@ -491,6 +522,8 @@ final class RefreshCoordinatorTests: XCTestCase {
     let snapshot = await coordinator.refresh(reason: .launch)
 
     XCTAssertTrue(snapshot.summary.isPartial)
+    XCTAssertEqual(snapshot.providerStates[.claude]?.isEnabled, true)
+    XCTAssertEqual(snapshot.providerStates[.claude]?.refreshStatus, .failed)
     guard case .failed(let message) = snapshot.attempts[.claude]?.first?.outcome else {
       return XCTFail("Expected repository read failure diagnostic")
     }

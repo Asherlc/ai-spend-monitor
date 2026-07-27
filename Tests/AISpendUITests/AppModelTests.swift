@@ -85,6 +85,130 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.dailySpend(for: .claude).map(\.amount), [Money(10)])
   }
 
+  func testNoDataSnapshotUsesUnavailableLabelsInsteadOfZeroDollars() {
+    let noData = Self.snapshot(
+      total: 0,
+      providers: [],
+      providerStates: [
+        .openAI: StoredProviderState(provider: .openAI, isEnabled: true)
+      ],
+      hasCurrentMonthData: false
+    )
+    let model = AppModel(snapshot: noData, refresh: { _ in noData })
+
+    XCTAssertEqual(model.availability, .unavailable)
+    XCTAssertEqual(model.statusTitle, "No data")
+    XCTAssertEqual(model.headlineTitle, "No current data")
+  }
+
+  func testProviderRowsIncludeEnabledProviderWithoutCachedSpend() {
+    let failedClaude = StoredProviderState(
+      provider: .claude,
+      isEnabled: true,
+      lastAttemptAt: Date(timeIntervalSince1970: 100),
+      refreshStatus: .failed,
+      lastFailureMessage: "Admin scope unavailable"
+    )
+    let snapshot = Self.snapshot(
+      total: 12,
+      providers: [
+        ProviderSpendSummary(
+          id: .cursor,
+          actual: Money(12),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      providerStates: [
+        .cursor: StoredProviderState(provider: .cursor, isEnabled: true),
+        .claude: failedClaude,
+      ],
+      attempts: [
+        .claude: [
+          SourceAttempt(
+            strategyID: "claude-actual",
+            outcome: .failed(redactedMessage: "Admin scope unavailable")
+          )
+        ]
+      ]
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    XCTAssertEqual(model.providerRows.map(\.id), [.cursor, .claude])
+    XCTAssertEqual(model.providerRows.last?.summary.total, .zero)
+    XCTAssertEqual(model.providerRows.last?.attempts.count, 1)
+  }
+
+  func testProviderStatusUsesProviderSpecificDatesAndCacheAge() {
+    let lastSuccess = Date(timeIntervalSince1970: 50)
+    let lastAttempt = Date(timeIntervalSince1970: 100)
+    let snapshot = Self.snapshot(
+      total: 12,
+      providers: [],
+      providerStates: [
+        .claude: StoredProviderState(
+          provider: .claude,
+          isEnabled: true,
+          lastAttemptAt: lastAttempt,
+          lastSuccessfulAt: lastSuccess,
+          refreshStatus: .failed,
+          lastFailureMessage: "Temporary failure"
+        )
+      ],
+      refreshedAt: lastAttempt,
+      evaluatedAt: Date(timeIntervalSince1970: 150)
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    let status = model.providerRows.first?.status
+    XCTAssertEqual(status?.lastAttemptAt, lastAttempt)
+    XCTAssertEqual(status?.lastSuccessfulAt, lastSuccess)
+    XCTAssertEqual(
+      status?.freshness,
+      .cachedAfterFailure(age: 100, message: "Temporary failure")
+    )
+  }
+
+  func testMonthTitleUsesAggregationWindowInsteadOfRefreshDate() {
+    let january = MonthWindow(
+      start: Date(timeIntervalSince1970: 0),
+      end: Date(timeIntervalSince1970: 2_678_400)
+    )
+    let refreshedInFebruary = Date(timeIntervalSince1970: 3_000_000)
+    let snapshot = Self.snapshot(
+      total: 12,
+      providers: [],
+      monthWindow: january,
+      refreshedAt: refreshedInFebruary
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    XCTAssertEqual(model.monthTitle, SpendFormatting.month(january.start))
+    XCTAssertNotEqual(model.monthTitle, SpendFormatting.month(refreshedInFebruary))
+  }
+
+  func testRecordLoaderFailureClearsDailyHistoryAndMarksItUnavailable() async throws {
+    let record = try spendRecord(
+      id: "before",
+      start: Date(timeIntervalSince1970: 1_728_000),
+      amount: 10,
+      quality: .actual,
+      source: "billing"
+    )
+    let loader = RecordLoaderStub(records: [record])
+    let model = AppModel(
+      snapshot: Self.updatedSnapshot,
+      refresh: { _ in Self.updatedSnapshot },
+      records: loader.load
+    )
+    loader.shouldFail = true
+
+    await model.refresh()
+
+    XCTAssertTrue(model.dailyHistoryUnavailable)
+    XCTAssertTrue(model.dailySpend(for: .claude).isEmpty)
+  }
+
   private static let initialSnapshot = snapshot(
     total: 12,
     providers: [
@@ -124,13 +248,20 @@ final class AppModelTests: XCTestCase {
   private static func snapshot(
     total: Decimal,
     providers: [ProviderSpendSummary],
-    budgets: [BudgetDefinition] = []
+    budgets: [BudgetDefinition] = [],
+    providerStates: [ProviderID: StoredProviderState] = [:],
+    attempts: [ProviderID: [SourceAttempt]] = [:],
+    hasCurrentMonthData: Bool? = nil,
+    monthWindow: MonthWindow? = nil,
+    refreshedAt: Date = Date(timeIntervalSince1970: 100),
+    evaluatedAt: Date? = nil
   ) -> RefreshSnapshot {
     let actual = providers.reduce(Money.zero) { $0 + $1.actual }
     let estimated = providers.reduce(Money.zero) { $0 + $1.estimated }
     let start = Date(timeIntervalSince1970: 0)
     let end = start.addingTimeInterval(30 * 24 * 60 * 60)
     let now = start.addingTimeInterval(10 * 24 * 60 * 60)
+    let window = monthWindow ?? MonthWindow(start: start, end: end)
     return RefreshSnapshot(
       summary: MonthlySummary(
         total: Money(total),
@@ -143,13 +274,17 @@ final class AppModelTests: XCTestCase {
         spend: Money(total),
         budgets: budgets,
         now: now,
-        window: MonthWindow(start: start, end: end),
+        window: window,
         hasAnyData: !providers.isEmpty,
         allDataIsStale: false
       ),
-      attempts: [:],
+      attempts: attempts,
       allDataIsStale: false,
-      refreshedAt: Date(timeIntervalSince1970: 100)
+      refreshedAt: refreshedAt,
+      evaluatedAt: evaluatedAt,
+      monthWindow: window,
+      providerStates: providerStates,
+      hasCurrentMonthData: hasCurrentMonthData ?? !providers.isEmpty
     )
   }
 
@@ -174,6 +309,25 @@ final class AppModelTests: XCTestCase {
       fetchedAt: start,
       estimate: nil
     )
+  }
+}
+
+private enum RecordLoadFailure: Error {
+  case failed
+}
+
+@MainActor
+private final class RecordLoaderStub {
+  var shouldFail = false
+  private let records: [SpendRecord]
+
+  init(records: [SpendRecord]) {
+    self.records = records
+  }
+
+  func load() throws -> [SpendRecord] {
+    if shouldFail { throw RecordLoadFailure.failed }
+    return records
   }
 }
 

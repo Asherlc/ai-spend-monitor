@@ -11,8 +11,8 @@ public struct SpendPopoverView: View {
 
   public var body: some View {
     Group {
-      if let provider = model.selectedProviderSummary {
-        ProviderDetailView(model: model, provider: provider)
+      if let provider = model.selectedProviderPresentation {
+        ProviderDetailView(model: model, presentation: provider)
       } else {
         overview
       }
@@ -43,24 +43,30 @@ public struct SpendPopoverView: View {
       Text(model.monthTitle.uppercased())
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
-      Text(SpendFormatting.currency(model.snapshot.summary.total))
+      Text(model.headlineTitle)
         .font(.system(size: 34, weight: .bold, design: .rounded))
         .monospacedDigit()
-        .accessibilityLabel(
-          "Combined monthly spend \(SpendFormatting.currency(model.snapshot.summary.total))"
+        .accessibilityLabel(headlineAccessibilityLabel)
+      if model.availability != .unavailable {
+        Text(
+          "\(SpendFormatting.currency(model.snapshot.summary.actual)) actual · "
+            + "\(SpendFormatting.estimated(model.snapshot.summary.estimated)) estimated"
         )
-      Text(
-        "\(SpendFormatting.currency(model.snapshot.summary.actual)) actual · "
-          + "\(SpendFormatting.estimated(model.snapshot.summary.estimated)) estimated"
-      )
-      .font(.callout)
-      .foregroundStyle(.secondary)
+        .font(.callout)
+        .foregroundStyle(.secondary)
+      }
     }
   }
 
   @ViewBuilder
   private var statusNotice: some View {
-    if model.snapshot.allDataIsStale {
+    if model.availability == .unavailable {
+      notice(
+        "No current-month data",
+        detail: "Open a provider to inspect its source status, then refresh to retry.",
+        symbol: "questionmark.circle.fill"
+      )
+    } else if model.snapshot.allDataIsStale {
       notice(
         "All data is stale",
         detail: "The displayed total is cached. Refresh to retry provider sources.",
@@ -124,7 +130,7 @@ public struct SpendPopoverView: View {
       Text("PROVIDERS")
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
-      if model.providerSummaries.isEmpty {
+      if model.providerRows.isEmpty {
         ContentUnavailableView(
           "No spend yet",
           systemImage: "dollarsign.circle",
@@ -132,9 +138,9 @@ public struct SpendPopoverView: View {
         )
         .frame(maxWidth: .infinity)
       } else {
-        ForEach(model.providerSummaries) { provider in
+        ForEach(model.providerRows) { provider in
           ProviderRow(
-            provider: provider,
+            presentation: provider,
             combinedTotal: model.snapshot.summary.total
           ) {
             model.selectedProvider = provider.id
@@ -142,6 +148,14 @@ public struct SpendPopoverView: View {
         }
       }
     }
+  }
+
+  private var headlineAccessibilityLabel: String {
+    if model.availability == .unavailable {
+      return "No current monthly spend data"
+    }
+    return
+      "Combined monthly spend \(SpendFormatting.currency(model.snapshot.summary.total))"
   }
 
   private var footer: some View {
