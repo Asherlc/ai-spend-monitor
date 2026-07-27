@@ -87,7 +87,7 @@ public struct CursorAdapter: ProviderAdapter {
     do {
       if let adminKey = try adminCredential() {
         let result = try await usage(window, adminKey)
-        let accountFingerprint = fingerprinter.fingerprint(
+        let accountFingerprint = try fingerprinter.fingerprint(
           identity: adminKey,
           namespace: "cursor-team"
         )

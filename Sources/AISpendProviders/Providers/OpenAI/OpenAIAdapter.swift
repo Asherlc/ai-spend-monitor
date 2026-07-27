@@ -60,11 +60,11 @@ public struct OpenAIAdapter: ProviderAdapter {
     let accountFingerprint: String
     do {
       resolvedCredential = try credential()
-      accountFingerprint = fingerprint(for: resolvedCredential)
+      accountFingerprint = try fingerprint(for: resolvedCredential)
     } catch is CancellationError {
       throw CancellationError()
     } catch {
-      accountFingerprint = fingerprint(for: nil)
+      accountFingerprint = try fingerprint(for: nil)
       attempts.append(
         .init(strategyID: "openai-actual", outcome: .failed(redactedMessage: message(for: error)))
       )
@@ -168,8 +168,8 @@ public struct OpenAIAdapter: ProviderAdapter {
     return redactor.redact(error.localizedDescription)
   }
 
-  private func fingerprint(for credential: Secret?) -> String {
-    fingerprinter.fingerprint(
+  private func fingerprint(for credential: Secret?) throws -> String {
+    try fingerprinter.fingerprint(
       identity: credential ?? localIdentity,
       namespace: "openai-account"
     )

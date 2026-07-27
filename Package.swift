@@ -11,7 +11,10 @@ let package = Package(
       name: "AISpendProviders",
       dependencies: ["AISpendCore"],
       resources: [.process("Resources")],
-      linkerSettings: [.linkedLibrary("sqlite3")]
+      linkerSettings: [
+        .linkedFramework("Security"),
+        .linkedLibrary("sqlite3"),
+      ]
     ),
     .target(name: "AISpendUI", dependencies: ["AISpendCore", "AISpendProviders"]),
     .executableTarget(

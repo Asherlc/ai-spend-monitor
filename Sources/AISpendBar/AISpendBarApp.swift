@@ -233,7 +233,8 @@ private final class BootstrapRecovery {
         runtime = try makeRuntime()
         self.runtime = runtime
       }
-      return await runtime.coordinator.refresh(reason: reason)
+      let snapshot = await runtime.coordinator.refresh(reason: reason)
+      return await runtime.alerts.process(snapshot: snapshot)
     } catch {
       return failureSnapshot()
     }
@@ -243,7 +244,7 @@ private final class BootstrapRecovery {
     guard let runtime else { throw BootstrapError.runtimeUnavailable }
     let window = try MonthWindow.current(
       containing: runtime.clock.now,
-      calendar: .current
+      calendar: runtime.calendarProvider()
     )
     return try runtime.repository.records(in: window)
   }
@@ -376,15 +377,28 @@ private final class BootstrapRecovery {
       OpenAIAdapter(scanner: CodexLogScanner(priceCatalog: catalog)),
     ]
     let clock = LiveClock()
+    let calendarProvider: @Sendable () -> Calendar = {
+      .autoupdatingCurrent
+    }
     let coordinator = RefreshCoordinator(
       adapters: adapters,
       repository: repository,
-      clock: clock
+      clock: clock,
+      calendarProvider: calendarProvider
+    )
+    let alerts = BudgetAlertRuntime(
+      repository: repository,
+      calendarProvider: calendarProvider,
+      deliver: { [notifications] decision in
+        try await notifications.deliver(decision)
+      }
     )
     return AppRuntime(
       repository: repository,
       coordinator: coordinator,
+      alerts: alerts,
       clock: clock,
+      calendarProvider: calendarProvider,
       browserDiscovery: browserDiscovery
     )
   }
@@ -401,7 +415,9 @@ private final class BootstrapRecovery {
 private struct AppRuntime {
   let repository: SwiftDataLedgerRepository
   let coordinator: RefreshCoordinator
+  let alerts: BudgetAlertRuntime
   let clock: LiveClock
+  let calendarProvider: @Sendable () -> Calendar
   let browserDiscovery: BrowserDiscoveryPreference
 }
 

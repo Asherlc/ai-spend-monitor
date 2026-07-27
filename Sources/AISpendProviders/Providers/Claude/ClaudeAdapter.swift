@@ -61,11 +61,11 @@ public struct ClaudeAdapter: ProviderAdapter {
 
     do {
       resolvedCredential = try credential()
-      accountFingerprint = fingerprint(for: resolvedCredential)
+      accountFingerprint = try fingerprint(for: resolvedCredential)
     } catch is CancellationError {
       throw CancellationError()
     } catch {
-      accountFingerprint = fingerprint(for: nil)
+      accountFingerprint = try fingerprint(for: nil)
       attempts.append(
         .init(strategyID: "claude-actual", outcome: .failed(redactedMessage: message(for: error)))
       )
@@ -173,7 +173,7 @@ public struct ClaudeAdapter: ProviderAdapter {
     return redactor.redact(error.localizedDescription)
   }
 
-  private func fingerprint(for credential: ClaudeCredential?) -> String {
+  private func fingerprint(for credential: ClaudeCredential?) throws -> String {
     let identity: Secret
     switch credential {
     case .adminKey(let secret), .bearerToken(let secret):
@@ -181,7 +181,10 @@ public struct ClaudeAdapter: ProviderAdapter {
     case nil:
       identity = localIdentity
     }
-    return fingerprinter.fingerprint(identity: identity, namespace: "claude-account")
+    return try fingerprinter.fingerprint(
+      identity: identity,
+      namespace: "claude-account"
+    )
   }
 
   private static func reaccount(

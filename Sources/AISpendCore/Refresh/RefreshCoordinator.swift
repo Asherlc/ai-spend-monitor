@@ -96,7 +96,7 @@ public final class RefreshCoordinator {
   private let aggregator: SpendAggregator
   private let pacingEngine: PacingEngine
   private let clock: any Clock
-  private let calendar: Calendar
+  private let calendarProvider: @Sendable () -> Calendar
   private let timeout: TimeInterval
   private let runWithTimeout: ProviderTimeout
   private let sanitizer: DiagnosticSanitizer
@@ -109,7 +109,10 @@ public final class RefreshCoordinator {
     aggregator: SpendAggregator = SpendAggregator(),
     pacingEngine: PacingEngine = PacingEngine(),
     clock: any Clock,
-    calendar: Calendar = .current,
+    calendar: Calendar? = nil,
+    calendarProvider: @escaping @Sendable () -> Calendar = {
+      .autoupdatingCurrent
+    },
     timeout: TimeInterval = 20,
     withTimeout: @escaping ProviderTimeout = RefreshCoordinator.withTimeout,
     sanitizer: DiagnosticSanitizer = DiagnosticSanitizer()
@@ -120,7 +123,11 @@ public final class RefreshCoordinator {
     self.aggregator = aggregator
     self.pacingEngine = pacingEngine
     self.clock = clock
-    self.calendar = calendar
+    if let calendar {
+      self.calendarProvider = { calendar }
+    } else {
+      self.calendarProvider = calendarProvider
+    }
     self.timeout = timeout
     runWithTimeout = withTimeout
     self.sanitizer = sanitizer
@@ -129,6 +136,15 @@ public final class RefreshCoordinator {
   public func refresh(reason: RefreshReason) async -> RefreshSnapshot {
     lastRefreshReason = reason
     let now = clock.now
+    let calendar = calendarProvider()
+    guard
+      let window = try? MonthWindow.current(
+        containing: now,
+        calendar: calendar
+      )
+    else {
+      return fallbackSnapshot(at: now, calendar: calendar)
+    }
     let initialStates: [ProviderID: StoredProviderState]
     do {
       initialStates = try repository.providerStates()
@@ -140,15 +156,12 @@ public final class RefreshCoordinator {
     }
 
     if reason == .popover,
+      lastSnapshot?.monthWindow == nil || lastSnapshot?.monthWindow == window,
       let lastAttemptAt = initialStates.values.compactMap(\.lastAttemptAt).max(),
       now.timeIntervalSince(lastAttemptAt) < 60,
       let snapshot = try? cachedSnapshot()
     {
       return snapshot
-    }
-
-    guard let window = try? MonthWindow.current(containing: now, calendar: calendar) else {
-      return fallbackSnapshot(at: now)
     }
 
     let enabledProviders = Set(
@@ -203,7 +216,7 @@ public final class RefreshCoordinator {
     }
 
     if Task.isCancelled {
-      return (try? cachedSnapshot()) ?? fallbackSnapshot(at: now)
+      return (try? cachedSnapshot()) ?? fallbackSnapshot(at: now, calendar: calendar)
     }
 
     var states = initialStates
@@ -223,7 +236,6 @@ public final class RefreshCoordinator {
             }
             continue
           }
-          try persist(result: result, in: window)
           let sanitizedAttempts = sanitize(result.attempts)
           let failureMessage = firstProblemMessage(in: sanitizedAttempts)
           let state = StoredProviderState(
@@ -236,7 +248,7 @@ public final class RefreshCoordinator {
             refreshStatus: failureMessage == nil ? .success : .failed,
             lastFailureMessage: failureMessage
           )
-          try repository.saveProviderState(state)
+          try persist(result: result, state: state, in: window)
           states[provider] = state
           attempts[provider] = sanitizedAttempts
         } catch {
@@ -279,16 +291,20 @@ public final class RefreshCoordinator {
   }
 
   public func cachedSnapshot() throws -> RefreshSnapshot {
-    if let lastSnapshot {
+    let now = clock.now
+    let calendar = calendarProvider()
+    let window = try MonthWindow.current(
+      containing: now,
+      calendar: calendar
+    )
+    if let lastSnapshot, lastSnapshot.monthWindow == window {
       return lastSnapshot
     }
 
-    let now = clock.now
     let states = try repository.providerStates()
     let enabledProviders = Set(
       states.values.filter(\.isEnabled).map(\.provider)
     )
-    let window = try MonthWindow.current(containing: now, calendar: calendar)
     let attempts = states.reduce(into: [ProviderID: [SourceAttempt]]()) {
       result,
       entry in
@@ -333,6 +349,7 @@ public final class RefreshCoordinator {
 
   private func persist(
     result: ProviderFetchResult,
+    state: StoredProviderState,
     in window: MonthWindow
   ) throws {
     guard result.records.allSatisfy({ $0.provider == result.provider }) else {
@@ -342,15 +359,13 @@ public final class RefreshCoordinator {
     guard recordSourceIDs.isSubset(of: result.refreshedSourceIDs) else {
       throw RefreshCoordinatorError.unrefreshedRecordSource
     }
-    let recordsBySource = Dictionary(grouping: result.records, by: \.sourceID)
-    for sourceID in result.refreshedSourceIDs {
-      try repository.replace(
-        records: recordsBySource[sourceID, default: []],
-        provider: result.provider,
-        sourceID: sourceID,
-        interval: window
-      )
-    }
+    try repository.applyProviderRefresh(
+      records: result.records,
+      provider: result.provider,
+      refreshedSourceIDs: result.refreshedSourceIDs,
+      interval: window,
+      state: state
+    )
   }
 
   private func recordFailure(
@@ -524,7 +539,11 @@ public final class RefreshCoordinator {
     return age > 30 * 60 ? .stale(age: age) : .fresh
   }
 
-  private func fallbackSnapshot(at now: Date) -> RefreshSnapshot {
+  private func fallbackSnapshot(
+    at now: Date,
+    calendar: Calendar? = nil
+  ) -> RefreshSnapshot {
+    let calendar = calendar ?? calendarProvider()
     let window =
       (try? MonthWindow.current(containing: now, calendar: calendar))
       ?? MonthWindow(start: now, end: now.addingTimeInterval(1))

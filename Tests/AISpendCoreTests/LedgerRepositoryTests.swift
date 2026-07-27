@@ -130,6 +130,83 @@ final class LedgerRepositoryTests: XCTestCase {
     XCTAssertEqual(try repository.records(in: month), [prior])
   }
 
+  func testBatchProviderRefreshFailureAfterFirstSourceRollsBackEverySourceAndState()
+    throws
+  {
+    let container = try makeContainer()
+    let month = monthWindow()
+    let seedingRepository = SwiftDataLedgerRepository(modelContainer: container)
+    let priorActual = try record(
+      id: "prior-actual",
+      amount: 8,
+      sourceID: "anthropic.cost"
+    )
+    let priorLocal = try record(
+      id: "prior-local",
+      amount: 2,
+      sourceID: "claude.local"
+    )
+    let priorState = StoredProviderState(
+      provider: .claude,
+      isEnabled: true,
+      lastAttemptAt: month.start,
+      lastSuccessfulAt: month.start,
+      refreshStatus: .success
+    )
+    try seedingRepository.replace(
+      records: [priorActual],
+      provider: .claude,
+      sourceID: "anthropic.cost",
+      interval: month
+    )
+    try seedingRepository.replace(
+      records: [priorLocal],
+      provider: .claude,
+      sourceID: "claude.local",
+      interval: month
+    )
+    try seedingRepository.saveProviderState(priorState)
+    let repository = SwiftDataLedgerRepository(
+      modelContainer: container,
+      beforeStagingSource: { index, _ in
+        if index == 1 { throw TestSaveError.forced }
+      }
+    )
+    let replacementActual = try record(
+      id: "replacement-actual",
+      amount: 12,
+      sourceID: "anthropic.cost"
+    )
+    let replacementLocal = try record(
+      id: "replacement-local",
+      amount: 5,
+      sourceID: "claude.local"
+    )
+    let replacementState = StoredProviderState(
+      provider: .claude,
+      isEnabled: true,
+      lastAttemptAt: month.start.addingTimeInterval(60),
+      lastSuccessfulAt: month.start.addingTimeInterval(60),
+      refreshStatus: .success
+    )
+
+    XCTAssertThrowsError(
+      try repository.applyProviderRefresh(
+        records: [replacementActual, replacementLocal],
+        provider: .claude,
+        refreshedSourceIDs: ["anthropic.cost", "claude.local"],
+        interval: month,
+        state: replacementState
+      )
+    )
+
+    XCTAssertEqual(
+      Set(try repository.records(in: month)),
+      [priorActual, priorLocal]
+    )
+    XCTAssertEqual(try repository.providerStates()[.claude], priorState)
+  }
+
   func testReplaceAcceptsSameRecordIDForMatchingSourceInterval() throws {
     let repository = try makeRepository()
     let month = monthWindow()

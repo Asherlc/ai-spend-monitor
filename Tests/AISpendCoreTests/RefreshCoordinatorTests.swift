@@ -230,6 +230,71 @@ final class RefreshCoordinatorTests: XCTestCase {
     XCTAssertEqual(snapshot.providerAvailability[.claude], .unavailable)
   }
 
+  func testPopoverWithinMinuteRefreshesAfterLocalMidnightMonthRollover() async throws {
+    let calendarBox = MutableCalendar(calendar: utcCalendar)
+    let julyEnd = utcCalendar.date(
+      from: DateComponents(
+        year: 2024,
+        month: 7,
+        day: 31,
+        hour: 23,
+        minute: 59,
+        second: 30
+      )
+    )!
+    let clock = MutableClock(now: julyEnd)
+    let repository = try makeRepository()
+    try enable([.claude], in: repository)
+    let adapter = AdapterSpy(provider: .claude, result: .success([]))
+    let coordinator = RefreshCoordinator(
+      adapters: [adapter],
+      repository: repository,
+      clock: clock,
+      calendarProvider: calendarBox.current
+    )
+
+    let julySnapshot = await coordinator.refresh(reason: .manual)
+    clock.now = julyEnd.addingTimeInterval(45)
+    let augustSnapshot = await coordinator.refresh(reason: .popover)
+    let fetchCount = await adapter.fetchCount
+
+    XCTAssertNotEqual(julySnapshot.monthWindow, augustSnapshot.monthWindow)
+    XCTAssertEqual(fetchCount, 2)
+    XCTAssertEqual(
+      utcCalendar.component(.month, from: augustSnapshot.monthWindow.start),
+      8
+    )
+  }
+
+  func testPopoverWithinMinuteRefreshesWhenCurrentTimezoneChangesMonth() async throws {
+    let instant = Date(timeIntervalSince1970: 1_722_474_000)  // 2024-08-01 01:00 UTC
+    let clock = MutableClock(now: instant)
+    let calendarBox = MutableCalendar(calendar: utcCalendar)
+    let repository = try makeRepository()
+    try enable([.claude], in: repository)
+    let adapter = AdapterSpy(provider: .claude, result: .success([]))
+    let coordinator = RefreshCoordinator(
+      adapters: [adapter],
+      repository: repository,
+      clock: clock,
+      calendarProvider: calendarBox.current
+    )
+
+    let utcSnapshot = await coordinator.refresh(reason: .manual)
+    var losAngeles = Calendar(identifier: .gregorian)
+    losAngeles.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+    calendarBox.calendar = losAngeles
+    let localSnapshot = await coordinator.refresh(reason: .popover)
+    let fetchCount = await adapter.fetchCount
+
+    XCTAssertNotEqual(utcSnapshot.monthWindow, localSnapshot.monthWindow)
+    XCTAssertEqual(fetchCount, 2)
+    XCTAssertEqual(
+      losAngeles.component(.month, from: localSnapshot.monthWindow.start),
+      7
+    )
+  }
+
   func testFreshnessGuardOnlyAppliesToPopoverReason() async throws {
     let reasons: [RefreshReason] = [
       .launch, .periodic, .manual, .providerEnabled(.claude),
@@ -745,6 +810,38 @@ private struct FixedClock: AISpendCore.Clock {
   let now: Date
 }
 
+private final class MutableClock: AISpendCore.Clock, @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: Date
+
+  init(now: Date) {
+    value = now
+  }
+
+  var now: Date {
+    get { lock.withLock { value } }
+    set { lock.withLock { value = newValue } }
+  }
+}
+
+private final class MutableCalendar: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: Calendar
+
+  init(calendar: Calendar) {
+    value = calendar
+  }
+
+  var calendar: Calendar {
+    get { lock.withLock { value } }
+    set { lock.withLock { value = newValue } }
+  }
+
+  func current() -> Calendar {
+    calendar
+  }
+}
+
 private actor AdapterSpy: ProviderAdapter {
   nonisolated let provider: ProviderID
   private let implementation: @Sendable (MonthWindow) async throws -> ProviderFetchResult
@@ -980,6 +1077,22 @@ private final class ReadFailingRepository: LedgerRepository {
 
   func saveProviderState(_ state: StoredProviderState) throws {
     try base.saveProviderState(state)
+  }
+
+  func applyProviderRefresh(
+    records: [SpendRecord],
+    provider: ProviderID,
+    refreshedSourceIDs: Set<String>,
+    interval: MonthWindow,
+    state: StoredProviderState
+  ) throws {
+    try base.applyProviderRefresh(
+      records: records,
+      provider: provider,
+      refreshedSourceIDs: refreshedSourceIDs,
+      interval: interval,
+      state: state
+    )
   }
 
   func budgets() throws -> [BudgetDefinition] {

@@ -20,6 +20,13 @@ public protocol LedgerRepository: AnyObject {
   ) throws
   func providerStates() throws -> [ProviderID: StoredProviderState]
   func saveProviderState(_ state: StoredProviderState) throws
+  func applyProviderRefresh(
+    records: [SpendRecord],
+    provider: ProviderID,
+    refreshedSourceIDs: Set<String>,
+    interval: MonthWindow,
+    state: StoredProviderState
+  ) throws
   func budgets() throws -> [BudgetDefinition]
   func addBudget(limit: Money, now: Date) throws -> BudgetDefinition
   func updateBudget(_ budget: BudgetDefinition) throws
@@ -32,12 +39,14 @@ public protocol LedgerRepository: AnyObject {
 public final class SwiftDataLedgerRepository: LedgerRepository {
   private let context: ModelContext
   private let saveContext: (ModelContext) throws -> Void
+  private let beforeStagingSource: (Int, String) throws -> Void
   private let jsonEncoder = JSONEncoder()
   private let jsonDecoder = JSONDecoder()
 
   public init(modelContainer: ModelContainer) {
     context = ModelContext(modelContainer)
     saveContext = { try $0.save() }
+    beforeStagingSource = { _, _ in }
   }
 
   init(
@@ -46,6 +55,16 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
   ) {
     context = ModelContext(modelContainer)
     self.saveContext = saveContext
+    beforeStagingSource = { _, _ in }
+  }
+
+  init(
+    modelContainer: ModelContainer,
+    beforeStagingSource: @escaping (Int, String) throws -> Void
+  ) {
+    context = ModelContext(modelContainer)
+    saveContext = { try $0.save() }
+    self.beforeStagingSource = beforeStagingSource
   }
 
   public func records(in window: MonthWindow) throws -> [SpendRecord] {
@@ -161,6 +180,104 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
         entity.lastSuccessfulAt = state.lastSuccessfulAt
         entity.refreshStatusRawValue = state.refreshStatus.rawValue
         entity.lastFailureMessage = sanitizedFailureMessage
+      } else {
+        context.insert(
+          ProviderStateEntity(
+            providerRawValue: providerRawValue,
+            isEnabled: state.isEnabled,
+            lastAttemptAt: state.lastAttemptAt,
+            lastSuccessfulAt: state.lastSuccessfulAt,
+            refreshStatusRawValue: state.refreshStatus.rawValue,
+            lastFailureMessage: sanitizedFailureMessage
+          )
+        )
+      }
+    }
+  }
+
+  public func applyProviderRefresh(
+    records: [SpendRecord],
+    provider: ProviderID,
+    refreshedSourceIDs: Set<String>,
+    interval: MonthWindow,
+    state: StoredProviderState
+  ) throws {
+    guard
+      interval.end > interval.start,
+      state.provider == provider,
+      refreshedSourceIDs.allSatisfy({ !$0.isEmpty })
+    else {
+      throw LedgerError.invalidRecord
+    }
+
+    var seenIDs = Set<String>()
+    let replacements = try records.map { record in
+      guard
+        record.provider == provider,
+        refreshedSourceIDs.contains(record.sourceID),
+        record.intervalStart >= interval.start,
+        record.intervalEnd <= interval.end,
+        seenIDs.insert(record.id).inserted
+      else {
+        throw LedgerError.invalidRecord
+      }
+      return try encodeRecord(record)
+    }
+    let replacementSourceByID = Dictionary(
+      uniqueKeysWithValues: replacements.map { ($0.recordID, $0.sourceID) }
+    )
+    let replacementIDs = Set(replacementSourceByID.keys)
+    let providerRawValue = provider.rawValue
+    let start = interval.start
+    let end = interval.end
+    let scopedDescriptor = FetchDescriptor<SpendRecordEntity>(
+      predicate: #Predicate {
+        $0.providerRawValue == providerRawValue
+          && $0.intervalStart >= start
+          && $0.intervalStart < end
+      }
+    )
+    let scoped = try context.fetch(scopedDescriptor)
+    let existing = scoped.filter { refreshedSourceIDs.contains($0.sourceID) }
+    let collisions = try context.fetch(FetchDescriptor<SpendRecordEntity>())
+      .filter { replacementIDs.contains($0.recordID) }
+    guard
+      collisions.allSatisfy({
+        $0.providerRawValue == providerRawValue
+          && $0.sourceID == replacementSourceByID[$0.recordID]
+          && $0.intervalStart >= start
+          && $0.intervalStart < end
+      })
+    else {
+      throw LedgerError.invalidRecord
+    }
+
+    let providerDescriptor = FetchDescriptor<ProviderStateEntity>(
+      predicate: #Predicate { $0.providerRawValue == providerRawValue }
+    )
+    let providerEntity = try context.fetch(providerDescriptor).first
+    let sanitizedFailureMessage = state.lastFailureMessage.map(
+      sanitizeDiagnostic
+    )
+    let recordsBySource = Dictionary(grouping: replacements, by: \.sourceID)
+    let existingBySource = Dictionary(grouping: existing, by: \.sourceID)
+
+    try performMutation {
+      for (index, sourceID) in refreshedSourceIDs.sorted().enumerated() {
+        try beforeStagingSource(index, sourceID)
+        for entity in existingBySource[sourceID, default: []] {
+          context.delete(entity)
+        }
+        for replacement in recordsBySource[sourceID, default: []] {
+          context.insert(replacement)
+        }
+      }
+      if let providerEntity {
+        providerEntity.isEnabled = state.isEnabled
+        providerEntity.lastAttemptAt = state.lastAttemptAt
+        providerEntity.lastSuccessfulAt = state.lastSuccessfulAt
+        providerEntity.refreshStatusRawValue = state.refreshStatus.rawValue
+        providerEntity.lastFailureMessage = sanitizedFailureMessage
       } else {
         context.insert(
           ProviderStateEntity(
