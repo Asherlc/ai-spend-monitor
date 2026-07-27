@@ -26,6 +26,7 @@ public struct ClaudeLogScanner: Sendable {
       sessionRoots: sessionRoots,
       priceCatalog: priceCatalog,
       calendar: calendar,
+      candidateLine: { $0.range(of: Self.assistantMarker) != nil },
       parser: Self.parse
     )
   }
@@ -34,14 +35,16 @@ public struct ClaudeLogScanner: Sendable {
     try scanner.scan(window: window, fetchedAt: fetchedAt)
   }
 
+  private static let assistantMarker = Data(#""assistant""#.utf8)
+
   private static func parse(
     _ object: [String: Any],
-    context _: inout LogParseContext
+    context: inout LogParseContext
   ) -> LocalUsage? {
     guard
       object["type"] as? String == "assistant",
       let timestampValue = object["timestamp"] as? String,
-      let timestamp = ISO8601DateFormatter().date(from: timestampValue),
+      let timestamp = context.parseTimestamp(timestampValue),
       let message = object["message"] as? [String: Any],
       let model = message["model"] as? String,
       let usage = message["usage"] as? [String: Any],

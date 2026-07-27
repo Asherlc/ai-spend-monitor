@@ -5,6 +5,38 @@ import XCTest
 @testable import AISpendProviders
 
 final class ClaudeLogScannerTests: XCTestCase {
+  func testSkipsIrrelevantLinesBeforeJSONDecoding() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("large-session.jsonl")
+    let irrelevant = Data(repeating: 0x78, count: 262_144)
+    let usage = Data(
+      """
+      {"type":"assistant","timestamp":"2026-06-12T10:45:00Z","requestId":"request-1","message":{"id":"message-1","model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+
+      """.utf8
+    )
+    var contents = irrelevant
+    contents.append(0x0A)
+    contents.append(usage)
+    try contents.write(to: file)
+    try setModificationDate(file)
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try ClaudeLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar
+    ).scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(result.records.count, 1)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
   func testScansStreamsDeduplicatesAndAggregatesOneRecordPerModelDay() throws {
     let root = try fixtureRoot(named: "claude-session")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -36,7 +68,7 @@ final class ClaudeLogScannerTests: XCTestCase {
     XCTAssertEqual(record.estimate?.cachedInputTokens, 200_000)
     XCTAssertEqual(record.estimate?.outputTokens, 100_000)
     XCTAssertEqual(record.estimate?.catalogVersion, "2026-07-27")
-    XCTAssertEqual(result.diagnostics.count, 1)
+    XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
   func testObservationIDIsDeterministicAcrossRootOrdering() throws {

@@ -26,6 +26,10 @@ public struct CodexLogScanner: Sendable {
       sessionRoots: sessionRoots,
       priceCatalog: priceCatalog,
       calendar: calendar,
+      candidateLine: {
+        $0.range(of: Self.turnContextMarker) != nil
+          || $0.range(of: Self.tokenCountMarker) != nil
+      },
       parser: Self.parse
     )
   }
@@ -33,6 +37,9 @@ public struct CodexLogScanner: Sendable {
   public func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
     try scanner.scan(window: window, fetchedAt: fetchedAt)
   }
+
+  private static let turnContextMarker = Data(#""turn_context""#.utf8)
+  private static let tokenCountMarker = Data(#""token_count""#.utf8)
 
   private static func parse(
     _ object: [String: Any],
@@ -48,7 +55,7 @@ public struct CodexLogScanner: Sendable {
     guard
       object["type"] as? String == "event_msg",
       let timestampValue = object["timestamp"] as? String,
-      let timestamp = ISO8601DateFormatter().date(from: timestampValue),
+      let timestamp = context.parseTimestamp(timestampValue),
       let payload = object["payload"] as? [String: Any],
       payload["type"] as? String == "token_count",
       let model = payload["model"] as? String ?? context.model,

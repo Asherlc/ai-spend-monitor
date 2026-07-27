@@ -179,6 +179,26 @@ final class RefreshCoordinatorTests: XCTestCase {
     )
   }
 
+  func testProductionDefaultAllowsLargeLocalHistoryScans() async throws {
+    let repository = try makeRepository()
+    try enable([.openAI], in: repository)
+    let timeout = TimeoutSpy()
+    let coordinator = RefreshCoordinator(
+      adapters: [AdapterSpy(provider: .openAI, result: .success([]))],
+      repository: repository,
+      clock: FixedClock(now: now),
+      calendar: utcCalendar,
+      withTimeout: { duration, operation in
+        try await timeout.run(duration, operation)
+      }
+    )
+
+    _ = await coordinator.refresh(reason: .launch)
+
+    let receivedTimeouts = await timeout.receivedTimeouts
+    XCTAssertEqual(receivedTimeouts, [45])
+  }
+
   func testRecentPopoverAttemptReturnsCachedSnapshotWithoutFetching() async throws {
     let repository = try makeRepository()
     try repository.saveProviderState(
