@@ -44,8 +44,10 @@ public struct KeychainCredential: Hashable, Sendable {
 public struct CredentialHost: Sendable {
   public static let allowedEnvironmentNames: Set<String> = [
     "ANTHROPIC_API_KEY",
+    "ANTHROPIC_ADMIN_KEY",
     "CURSOR_ACCESS_TOKEN",
     "OPENAI_API_KEY",
+    "OPENAI_ADMIN_KEY",
   ]
 
   public static let allowedKeychainCredentials: Set<KeychainCredential> = [

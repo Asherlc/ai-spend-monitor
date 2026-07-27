@@ -72,6 +72,7 @@ final class HTTPClientTests: XCTestCase {
     request.setValue("Bearer secret", forHTTPHeaderField: "Authorization")
     request.setValue("session=secret", forHTTPHeaderField: "Cookie")
     request.setValue("admin-secret", forHTTPHeaderField: "X-API-Key")
+    request.setValue("team-secret", forHTTPHeaderField: "X-Cursor-Team-Id")
     request.setValue("safe", forHTTPHeaderField: "Accept")
 
     let redirected = try XCTUnwrap(
@@ -81,6 +82,7 @@ final class HTTPClientTests: XCTestCase {
     XCTAssertNil(redirected.value(forHTTPHeaderField: "Authorization"))
     XCTAssertNil(redirected.value(forHTTPHeaderField: "Cookie"))
     XCTAssertNil(redirected.value(forHTTPHeaderField: "X-API-Key"))
+    XCTAssertNil(redirected.value(forHTTPHeaderField: "X-Cursor-Team-Id"))
     XCTAssertEqual(redirected.value(forHTTPHeaderField: "Accept"), "safe")
   }
 }

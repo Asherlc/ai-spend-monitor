@@ -1,0 +1,59 @@
+{
+  "totalUsageEventsCount": 4,
+  "usageEvents": [
+    {
+      "id": "usage-1",
+      "kind": "Usage-based",
+      "model": "claude-sonnet-4-5",
+      "timestamp": "1781092800000",
+      "maxMode": false,
+      "isTokenBasedCall": true,
+      "tokenUsage": {
+        "inputTokens": 100,
+        "outputTokens": 20,
+        "cacheWriteTokens": 0,
+        "cacheReadTokens": 0,
+        "totalCents": 225.125
+      },
+      "requestsCosts": 999,
+      "isFreeBugbot": false,
+      "userEmail": "member-one@example.invalid"
+    },
+    {
+      "id": "included-1",
+      "kind": "Included in Business",
+      "model": "claude-sonnet-4-5",
+      "timestamp": "1781096400000",
+      "maxMode": false,
+      "isTokenBasedCall": false,
+      "tokenUsage": { "totalCents": 5000 },
+      "requestsCosts": 5000,
+      "isFreeBugbot": false,
+      "userEmail": "member-one@example.invalid"
+    },
+    {
+      "id": "seat-1",
+      "kind": "Team",
+      "model": null,
+      "timestamp": "1781100000000",
+      "maxMode": false,
+      "isTokenBasedCall": false,
+      "tokenUsage": null,
+      "requestsCosts": 10000,
+      "isFreeBugbot": false,
+      "userEmail": "member-two@example.invalid"
+    }
+  ],
+  "pagination": {
+    "numPages": 2,
+    "currentPage": 1,
+    "pageSize": 3,
+    "totalItems": 4,
+    "hasNextPage": true,
+    "hasPreviousPage": false
+  },
+  "period": {
+    "startDate": 1780272000000,
+    "endDate": 1782864000000
+  }
+}

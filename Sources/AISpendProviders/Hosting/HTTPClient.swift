@@ -81,6 +81,7 @@ private enum HTTPRequestPolicy {
     "Proxy-Authorization",
     "X-API-Key",
     "OpenAI-Organization",
+    "X-Cursor-Team-Id",
     "anthropic-api-key",
   ]
 
