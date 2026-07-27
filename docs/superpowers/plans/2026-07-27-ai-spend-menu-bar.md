@@ -324,13 +324,13 @@ final class MonthWindowTests: XCTestCase {
 final class PacingEngineTests: XCTestCase {
     func testEvaluatesMultipleBudgetsIndependently() throws {
         let start = Date(timeIntervalSince1970: 0)
-        let window = MonthWindow(start: start, end: start.addingTimeInterval(100))
+        let window = MonthWindow(start: start, end: start.addingTimeInterval(360_000))
         let result = PacingEngine().evaluate(
             spend: Money(400), budgets: [
                 BudgetDefinition(id: UUID(), limit: Money(500), isEnabled: true, createdAt: start),
                 BudgetDefinition(id: UUID(), limit: Money(1_500), isEnabled: true, createdAt: start),
             ],
-            now: start.addingTimeInterval(50), window: window,
+            now: start.addingTimeInterval(180_000), window: window,
             hasAnyData: true, allDataIsStale: false)
         XCTAssertEqual(result.projection, Money(800))
         XCTAssertEqual(result.budgets.map(\.state), [.offPace, .onPace])
@@ -392,7 +392,7 @@ public struct PacingEngine: Sendable {
 }
 ```
 
-Use elapsed real seconds divided by `MonthWindow.duration`. Return `unknown` budget states with no projection when `hasAnyData` is false. Return `collecting` for the first six elapsed hours. Sort enabled budgets by limit ascending.
+Use elapsed real seconds divided by `MonthWindow.duration`. Return `unknown` budget states with no projection when `hasAnyData` is false. Return `collecting` for the first six elapsed hours for every window; do not infer a test mode from window duration. Sort enabled budgets by limit ascending.
 
 - [ ] **Step 4: Run calendar and pacing tests**
 
