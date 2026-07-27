@@ -5,14 +5,14 @@ import XCTest
 final class PacingEngineTests: XCTestCase {
   func testEvaluatesMultipleBudgetsIndependently() throws {
     let start = Date(timeIntervalSince1970: 0)
-    let window = MonthWindow(start: start, end: start.addingTimeInterval(100))
+    let window = MonthWindow(start: start, end: start.addingTimeInterval(360_000))
     let result = PacingEngine().evaluate(
       spend: Money(400),
       budgets: [
         BudgetDefinition(id: UUID(), limit: Money(500), isEnabled: true, createdAt: start),
         BudgetDefinition(id: UUID(), limit: Money(1_500), isEnabled: true, createdAt: start),
       ],
-      now: start.addingTimeInterval(50), window: window,
+      now: start.addingTimeInterval(180_000), window: window,
       hasAnyData: true, allDataIsStale: false)
     XCTAssertEqual(result.projection, Money(800))
     XCTAssertEqual(result.budgets.map(\.state), [.offPace, .onPace])
@@ -24,6 +24,21 @@ final class PacingEngineTests: XCTestCase {
     let result = PacingEngine().evaluate(
       spend: Money(5), budgets: [], now: start.addingTimeInterval(60),
       window: window, hasAnyData: true, allDataIsStale: false)
+    XCTAssertNil(result.projection)
+    XCTAssertTrue(result.isCollecting)
+  }
+
+  func testCollectsForFirstSixHoursEvenWhenWindowIsShorter() {
+    let start = Date(timeIntervalSince1970: 0)
+    let result = PacingEngine().evaluate(
+      spend: Money(5),
+      budgets: [],
+      now: start.addingTimeInterval(50),
+      window: MonthWindow(start: start, end: start.addingTimeInterval(100)),
+      hasAnyData: true,
+      allDataIsStale: false
+    )
+
     XCTAssertNil(result.projection)
     XCTAssertTrue(result.isCollecting)
   }

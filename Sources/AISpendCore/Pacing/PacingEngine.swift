@@ -49,8 +49,7 @@ public struct PacingEngine: Sendable {
 
     let elapsed = now.timeIntervalSince(window.start)
     let collectionDuration: TimeInterval = 6 * 60 * 60
-    let isCollecting =
-      window.duration > collectionDuration && elapsed < collectionDuration
+    let isCollecting = elapsed < collectionDuration
     guard !isCollecting, elapsed > 0, window.duration > 0 else {
       return PacingResult(
         projection: nil,
