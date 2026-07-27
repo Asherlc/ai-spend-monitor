@@ -2,6 +2,7 @@ import AISpendCore
 import AISpendProviders
 import AISpendUI
 import AppKit
+import Darwin
 import SwiftData
 import SwiftUI
 
@@ -11,6 +12,9 @@ struct AISpendBarApp: App {
   private let lifecycle: AppLifecycleController
 
   init() {
+    if CommandLine.arguments.contains("--self-check") {
+      AppSelfCheck.runAndExit()
+    }
     let model = AppEnvironment.makeModel()
     _model = State(initialValue: model)
     let lifecycle = AppLifecycleController(model: model)
@@ -38,10 +42,13 @@ final class AppLifecycleController: NSObject {
     @MainActor @Sendable (RefreshReason) async -> Void
   typealias SleepAction =
     @Sendable (Duration) async throws -> Void
+  typealias CancelAction =
+    @MainActor @Sendable () -> Void
 
   private let interval: Duration
   private let refresh: RefreshAction
   private let sleep: SleepAction
+  private let cancelRefresh: CancelAction
   private var loopTask: Task<Void, Never>?
   private var generation = 0
 
@@ -50,12 +57,14 @@ final class AppLifecycleController: NSObject {
   init(
     interval: Duration = .seconds(15 * 60),
     refresh: @escaping RefreshAction,
+    cancelRefresh: @escaping CancelAction = {},
     sleep: @escaping SleepAction = {
       try await ContinuousClock().sleep(for: $0)
     }
   ) {
     self.interval = interval
     self.refresh = refresh
+    self.cancelRefresh = cancelRefresh
     self.sleep = sleep
     super.init()
     NotificationCenter.default.addObserver(
@@ -67,16 +76,21 @@ final class AppLifecycleController: NSObject {
   }
 
   convenience init(model: AppModel) {
-    self.init { [weak model] reason in
-      switch reason {
-      case .launch:
-        await model?.launch()
-      case .periodic:
-        await model?.periodicRefresh()
-      case .popover, .manual, .providerEnabled:
-        break
+    self.init(
+      refresh: { [weak model] reason in
+        switch reason {
+        case .launch:
+          await model?.launch()
+        case .periodic:
+          await model?.periodicRefresh()
+        case .popover, .manual, .providerEnabled:
+          break
+        }
+      },
+      cancelRefresh: { [weak model] in
+        model?.cancelActiveRefresh()
       }
-    }
+    )
   }
 
   func start() {
@@ -105,6 +119,7 @@ final class AppLifecycleController: NSObject {
     generation += 1
     loopTask?.cancel()
     loopTask = nil
+    cancelRefresh()
   }
 
   @objc private func applicationWillTerminate() {
@@ -115,6 +130,41 @@ final class AppLifecycleController: NSObject {
     guard generation == completedGeneration else { return }
     loopTask = nil
   }
+}
+
+private enum AppSelfCheck {
+  static func runAndExit() -> Never {
+    do {
+      guard Bundle.main.bundleIdentifier == "com.ashercohen.AISpendBar",
+        Bundle.main.object(forInfoDictionaryKey: "LSUIElement") as? Bool == true,
+        let executableURL = Bundle.main.executableURL,
+        FileManager.default.isExecutableFile(atPath: executableURL.path),
+        let resourceURL = Bundle.main.resourceURL,
+        FileManager.default.fileExists(
+          atPath:
+            resourceURL
+            .appendingPathComponent("AISpendBar_AISpendBar.bundle")
+            .path
+        )
+      else {
+        throw SelfCheckError.invalidBundle
+      }
+      _ = try PriceCatalog.bundled()
+      write("AISpendBar self-check: OK\n", to: .standardOutput)
+      exit(EXIT_SUCCESS)
+    } catch {
+      write("AISpendBar self-check: FAILED\n", to: .standardError)
+      exit(EXIT_FAILURE)
+    }
+  }
+
+  private static func write(_ message: String, to handle: FileHandle) {
+    handle.write(Data(message.utf8))
+  }
+}
+
+private enum SelfCheckError: Error {
+  case invalidBundle
 }
 
 @MainActor

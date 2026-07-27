@@ -204,6 +204,13 @@ public final class AppModel {
     await performRefresh(reason: .manual)
   }
 
+  public func cancelActiveRefresh() {
+    refreshGeneration += 1
+    refreshTask?.cancel()
+    refreshTask = nil
+    isRefreshing = false
+  }
+
   public var statusTitle: String {
     guard availability != .unavailable else { return "No data" }
     let amount = SpendFormatting.menuBar(snapshot.summary.total)

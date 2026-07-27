@@ -1,4 +1,5 @@
 import AISpendCore
+import AISpendUI
 import XCTest
 
 @testable import AISpendBar
@@ -41,6 +42,32 @@ final class AppLifecycleControllerTests: XCTestCase {
     XCTAssertEqual(reasons.count, countAfterStop)
   }
 
+  func testStopCancelsAnActiveAppModelRefresh() async throws {
+    var refreshStarted = false
+    var refreshWasCancelled = false
+    let snapshot = Self.snapshot()
+    let model = AppModel(
+      snapshot: snapshot,
+      refresh: { _ in
+        refreshStarted = true
+        while !Task.isCancelled {
+          await Task.yield()
+        }
+        refreshWasCancelled = true
+        return snapshot
+      }
+    )
+    let lifecycle = AppLifecycleController(model: model)
+
+    lifecycle.start()
+    try await waitUntil { refreshStarted }
+    lifecycle.stop()
+    try await waitUntil { refreshWasCancelled }
+
+    XCTAssertFalse(lifecycle.isRunning)
+    XCTAssertFalse(model.isRefreshing)
+  }
+
   private func waitUntil(
     timeout: Duration = .seconds(1),
     condition: @escaping @MainActor () -> Bool
@@ -54,5 +81,35 @@ final class AppLifecycleControllerTests: XCTestCase {
       }
       try await clock.sleep(for: .milliseconds(1))
     }
+  }
+
+  private static func snapshot() -> RefreshSnapshot {
+    let start = Date(timeIntervalSince1970: 0)
+    let window = MonthWindow(
+      start: start,
+      end: start.addingTimeInterval(30 * 24 * 60 * 60)
+    )
+    return RefreshSnapshot(
+      summary: MonthlySummary(
+        total: .zero,
+        actual: .zero,
+        estimated: .zero,
+        providers: [],
+        isPartial: false
+      ),
+      pacing: PacingEngine().evaluate(
+        spend: .zero,
+        budgets: [],
+        now: start.addingTimeInterval(24 * 60 * 60),
+        window: window,
+        hasAnyData: false,
+        allDataIsStale: false
+      ),
+      attempts: [:],
+      allDataIsStale: false,
+      refreshedAt: start,
+      monthWindow: window,
+      dataAvailability: .unavailable
+    )
   }
 }

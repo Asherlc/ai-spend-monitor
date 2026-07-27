@@ -23,22 +23,28 @@ This is a monitoring aid, not an invoice or accounting export.
 
 ## Data sources and limitations
 
-Sources are attempted in this order:
+The shipped adapters attempt these sources:
 
-1. **Cursor:** an existing authenticated Cursor browser/app session, then an
-   already available Cursor Admin API credential. Cursor has no local-log
-   estimate fallback. Only usage-based team spend is included.
-2. **Claude:** an existing Anthropic organization-admin credential, then an
-   authenticated Enterprise analytics session when usable, then supported local
-   Claude Code session logs as estimates.
-3. **Codex/OpenAI:** an existing OpenAI organization-admin credential, then an
-   authenticated dashboard session when usable, then supported local Codex
-   session logs as estimates.
+1. **Cursor:** `CURSOR_ADMIN_API_KEY` supplies actual team spend and model
+   attribution through Cursor's documented Admin API. An existing Cursor app
+   session can be detected for diagnostics, but session-based billing retrieval
+   is explicitly unsupported because Cursor exposes no documented app-session
+   billing endpoint. Cursor has no local-log estimate fallback. Only usage-based
+   team spend is included.
+2. **Claude:** `ANTHROPIC_ADMIN_KEY`, or `ANTHROPIC_OAUTH_TOKEN` when the admin
+   key is absent, supplies actual organization cost reports. Supported local
+   Claude Code session logs are then scanned for uncovered estimates. No Claude
+   Enterprise browser/session billing integration is wired in this release.
+3. **Codex/OpenAI:** `OPENAI_ADMIN_KEY` supplies actual organization cost
+   reports. Supported local Codex session logs are then scanned for uncovered
+   estimates. No OpenAI dashboard-session billing integration is wired in this
+   release.
 
 Ordinary CLI logins often authorize product use but do not include organization
 billing scope. In that case actual billing can be unavailable even while the CLI
-works; Claude and Codex may still show local estimates. Usage-limit percentages
-are not converted into dollar spend.
+works. Normal Claude Code and Codex CLI login state is not treated as an admin
+billing credential; Claude and Codex may still show local estimates. Usage-limit
+percentages are not converted into dollar spend.
 
 Data can be partial when a provider is unavailable or stale. Cached data is kept
 after a failed refresh and becomes stale after 30 minutes. Pacing begins after
@@ -102,8 +108,11 @@ open AISpendBar.app
 
 `Scripts/package_app.sh` only recreates `AISpendBar.app` at the repository root.
 The smoke test verifies its executable, menu-bar-only metadata, resource
-bundles, and code signature. Because `LSUIElement` is enabled, the packaged app
-runs without a normal Dock icon. Quit it from Activity Monitor or with
+bundles, decoded price catalog through a credential-free packaged runtime
+self-check, and code signature. The self-check exits before app initialization,
+provider discovery, network work, or notification permission. Because
+`LSUIElement` is enabled, the packaged app runs without a normal Dock icon. Quit
+it from Activity Monitor or with
 `pkill -x AISpendBar` during local development.
 
 The local ledger is stored beneath:
