@@ -7,6 +7,14 @@ import XCTest
 
 @MainActor
 final class BudgetNotificationClientTests: XCTestCase {
+  func testNotificationCompletionCanArriveOffMainActor() async throws {
+    try await BudgetNotificationTransport.awaitCompletion { completion in
+      DispatchQueue.global().async {
+        completion(nil)
+      }
+    }
+  }
+
   func testRequestsAuthorizationOnlyForFirstEnabledBudgetTransition() async throws {
     let recorder = NotificationRecorder()
     let client = BudgetNotificationClient(transport: recorder.transport())

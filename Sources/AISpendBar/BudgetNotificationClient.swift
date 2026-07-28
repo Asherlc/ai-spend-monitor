@@ -39,19 +39,52 @@ struct BudgetNotificationTransport: Sendable {
         try await center.requestAuthorization(options: options)
       },
       add: { request in
-        try await withCheckedThrowingContinuation { continuation in
-          center.add(
-            request,
-            withCompletionHandler: { error in
-              if let error {
-                continuation.resume(throwing: error)
-              } else {
-                continuation.resume()
-              }
-            })
+        let submission = NotificationSubmission(
+          center: center,
+          request: request
+        )
+        try await awaitCompletion { completion in
+          submission.submit(completion: completion)
         }
       }
     )
+  }
+
+  nonisolated static func awaitCompletion(
+    _ operation:
+      @escaping @Sendable (@escaping @Sendable (Error?) -> Void) -> Void
+  ) async throws {
+    try await withCheckedThrowingContinuation {
+      (continuation: CheckedContinuation<Void, Error>) in
+      operation { error in
+        if let error {
+          continuation.resume(throwing: error)
+        } else {
+          continuation.resume()
+        }
+      }
+    }
+  }
+}
+
+// UserNotifications invokes completion handlers on its private callback queue.
+// Keep the unchecked boundary limited to immutable request submission state.
+private final class NotificationSubmission: @unchecked Sendable {
+  private let center: UNUserNotificationCenter
+  private let request: UNNotificationRequest
+
+  init(
+    center: UNUserNotificationCenter,
+    request: UNNotificationRequest
+  ) {
+    self.center = center
+    self.request = request
+  }
+
+  func submit(
+    completion: @escaping @Sendable (Error?) -> Void
+  ) {
+    center.add(request, withCompletionHandler: completion)
   }
 }
 
