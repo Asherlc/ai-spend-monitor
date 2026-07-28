@@ -46,6 +46,21 @@ public struct ProviderPresentation: Identifiable, Hashable, Sendable {
       ? SpendFormatting.currency(summary.total)
       : "No data"
   }
+
+  public var amountDetail: String? {
+    guard availability == .available, summary.estimated.amount > 0 else {
+      return nil
+    }
+    return summary.actual == .zero
+      ? "Estimated"
+      : "\(SpendFormatting.estimated(summary.estimated)) estimated"
+  }
+}
+
+public enum SettingsTab: Hashable, Sendable {
+  case providers
+  case budgets
+  case privacy
 }
 
 public enum BudgetValidationResult: Equatable, Sendable {
@@ -132,6 +147,7 @@ public final class AppModel {
   public private(set) var settingsError: String?
   public let localDataURL: URL
   public var selectedProvider: ProviderID?
+  public var selectedSettingsTab: SettingsTab = .providers
 
   private let refreshAction: RefreshAction
   private let recordLoader: RecordLoader?
@@ -202,6 +218,10 @@ public final class AppModel {
 
   public func refresh() async {
     await performRefresh(reason: .manual)
+  }
+
+  public func prepareToAddBudget() {
+    selectedSettingsTab = .budgets
   }
 
   public func cancelActiveRefresh() {
