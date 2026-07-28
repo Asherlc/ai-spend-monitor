@@ -1,3 +1,4 @@
+import AISpendCore
 import CryptoKit
 import Foundation
 import Security
@@ -31,7 +32,7 @@ public struct AccountFingerprinter: Sendable {
   }
 
   public static let production = AccountFingerprinter { identity, namespace in
-    let key = try AccountFingerprintKeyStore.shared.key()
+    let key = SymmetricKey(data: try AccountFingerprintKeyStore.shared.keyData())
     return identity.withValue { value in
       keyedIdentifier([namespace, value], key: key)
     }
@@ -53,85 +54,83 @@ func stableIdentifier(_ components: [String]) -> String {
   return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
-private final class AccountFingerprintKeyStore: @unchecked Sendable {
-  static let shared = AccountFingerprintKeyStore()
+final class AccountFingerprintKeyStore: @unchecked Sendable {
+  static let shared = AccountFingerprintKeyStore(
+    fileURL: AppStorageLocation.defaultLedgerURL
+      .deletingLastPathComponent()
+      .appendingPathComponent("account-fingerprint-key-v1")
+  )
 
-  private static let service =
-    "com.ashercohen.AISpendBar.account-fingerprint"
-  private static let account = "hmac-key-v1"
   private static let keyLength = 32
 
+  private let fileURL: URL
+  private let randomData: @Sendable () throws -> Data
   private let lock = NSLock()
-  private var cachedKey: SymmetricKey?
+  private var cachedData: Data?
 
-  func key() throws -> SymmetricKey {
+  init(
+    fileURL: URL,
+    randomData: @escaping @Sendable () throws -> Data =
+      AccountFingerprintKeyStore.generateRandomData
+  ) {
+    self.fileURL = fileURL
+    self.randomData = randomData
+  }
+
+  func keyData() throws -> Data {
     try lock.withLock {
-      if let cachedKey {
-        return cachedKey
+      if let cachedData {
+        return cachedData
       }
-      let data = try loadOrCreateKey()
-      let key = SymmetricKey(data: data)
-      cachedKey = key
-      return key
+      let data = try loadOrCreateData()
+      cachedData = data
+      return data
     }
   }
 
-  private func loadOrCreateKey() throws -> Data {
-    if let existing = try readKey() {
-      guard existing.count == Self.keyLength else {
-        throw AccountFingerprintKeyError.invalidStoredKey
-      }
-      return existing
+  private func loadOrCreateData() throws -> Data {
+    if FileManager.default.fileExists(atPath: fileURL.path) {
+      return try validated(Data(contentsOf: fileURL))
     }
 
-    var bytes = [UInt8](repeating: 0, count: Self.keyLength)
+    let directory = fileURL.deletingLastPathComponent()
+    try FileManager.default.createDirectory(
+      at: directory,
+      withIntermediateDirectories: true,
+      attributes: [.posixPermissions: NSNumber(value: 0o700)]
+    )
+    let generated = try validated(randomData())
+    let attributes: [FileAttributeKey: Any] = [
+      .posixPermissions: NSNumber(value: 0o600)
+    ]
+    if FileManager.default.createFile(
+      atPath: fileURL.path,
+      contents: generated,
+      attributes: attributes
+    ) {
+      return generated
+    }
+    return try validated(Data(contentsOf: fileURL))
+  }
+
+  private func validated(_ data: Data) throws -> Data {
+    guard data.count == Self.keyLength else {
+      throw AccountFingerprintKeyError.invalidStoredKey
+    }
+    return data
+  }
+
+  private static func generateRandomData() throws -> Data {
+    var bytes = [UInt8](repeating: 0, count: keyLength)
     guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess
     else {
       throw AccountFingerprintKeyError.randomGenerationFailed
     }
-    let generated = Data(bytes)
-    let attributes: [CFString: Any] = [
-      kSecClass: kSecClassGenericPassword,
-      kSecAttrService: Self.service,
-      kSecAttrAccount: Self.account,
-      kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-      kSecValueData: generated,
-    ]
-    let status = SecItemAdd(attributes as CFDictionary, nil)
-    if status == errSecSuccess {
-      return generated
-    }
-    if status == errSecDuplicateItem, let existing = try readKey() {
-      guard existing.count == Self.keyLength else {
-        throw AccountFingerprintKeyError.invalidStoredKey
-      }
-      return existing
-    }
-    throw AccountFingerprintKeyError.keychainFailure(status)
-  }
-
-  private func readKey() throws -> Data? {
-    let query: [CFString: Any] = [
-      kSecClass: kSecClassGenericPassword,
-      kSecAttrService: Self.service,
-      kSecAttrAccount: Self.account,
-      kSecMatchLimit: kSecMatchLimitOne,
-      kSecReturnData: true,
-    ]
-    var result: CFTypeRef?
-    let status = SecItemCopyMatching(query as CFDictionary, &result)
-    if status == errSecItemNotFound {
-      return nil
-    }
-    guard status == errSecSuccess, let data = result as? Data else {
-      throw AccountFingerprintKeyError.keychainFailure(status)
-    }
-    return data
+    return Data(bytes)
   }
 }
 
-private enum AccountFingerprintKeyError: Error {
+enum AccountFingerprintKeyError: Error {
   case invalidStoredKey
   case randomGenerationFailed
-  case keychainFailure(OSStatus)
 }
