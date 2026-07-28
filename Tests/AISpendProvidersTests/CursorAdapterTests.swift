@@ -8,6 +8,7 @@ final class CursorAdapterTests: XCTestCase {
   func testClientPagesSpendAndUsageFiltersEventsAndIgnoresRequestUnits() async throws {
     let spend = try fixtureData("cursor-spend")
     let usage = try fixtureData("cursor-usage-events")
+    let adminKey = "cursor-admin"
     let requests = RequestRecorder()
     let client = CursorUsageClient(http: { request in
       requests.append(request)
@@ -36,7 +37,7 @@ final class CursorAdapterTests: XCTestCase {
 
     let result = try await client.fetch(
       window: juneWindow(),
-      adminKey: Secret("cursor-admin")
+      adminKey: Secret(adminKey)
     )
 
     XCTAssertEqual(result.authoritativeCents, Decimal(string: "600.375")!)
@@ -47,9 +48,11 @@ final class CursorAdapterTests: XCTestCase {
         "gpt-5": Decimal(string: "125.25")!,
       ])
     XCTAssertEqual(requests.count, 4)
+    let expectedAuthorization =
+      "Basic " + Data("\(adminKey):".utf8).base64EncodedString()
     XCTAssertTrue(
       requests.requests.allSatisfy {
-        $0.value(forHTTPHeaderField: "Authorization") == "Basic Y3Vyc29yLWFkbWluOg=="
+        $0.value(forHTTPHeaderField: "Authorization") == expectedAuthorization
       }
     )
   }

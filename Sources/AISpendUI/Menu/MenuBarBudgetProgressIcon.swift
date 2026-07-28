@@ -8,8 +8,7 @@ public struct MenuBarBudgetProgress: Equatable, Sendable {
   public let limit: Money
 
   public var accessibilityLabel: String {
-    let percentageText = NSDecimalNumber(decimal: percentage).stringValue
-    return "\(percentageText)% of \(SpendFormatting.currency(limit)) budget used"
+    "\(SpendFormatting.share(percentage / 100)) of \(SpendFormatting.currency(limit)) budget used"
   }
 
   public init(

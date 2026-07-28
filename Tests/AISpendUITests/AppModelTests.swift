@@ -263,6 +263,62 @@ final class AppModelTests: XCTestCase {
     )
   }
 
+  func testMenuBarProgressAccessibilityRoundsFractionalPercentageToOneDecimal() {
+    let snapshot = Self.snapshot(
+      total: 20,
+      providers: [
+        ProviderSpendSummary(
+          id: .openAI,
+          actual: Money(20),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(30),
+          isEnabled: true,
+          createdAt: .distantPast
+        )
+      ]
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    XCTAssertEqual(
+      model.menuBarBudgetProgress?.accessibilityLabel,
+      "66.7% of $30.00 budget used"
+    )
+  }
+
+  func testMenuBarAccessibilityCombinesSpendTitleAndBudgetProgress() {
+    let snapshot = Self.snapshot(
+      total: 20,
+      providers: [
+        ProviderSpendSummary(
+          id: .openAI,
+          actual: Money(20),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(30),
+          isEnabled: true,
+          createdAt: .distantPast
+        )
+      ]
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    XCTAssertEqual(
+      model.menuBarAccessibilityLabel,
+      "$20.00, 66.7% of $30.00 budget used"
+    )
+  }
+
   func testMenuBarProgressIsAbsentWithoutAnEnabledBudget() {
     let model = AppModel(
       snapshot: Self.initialSnapshot,

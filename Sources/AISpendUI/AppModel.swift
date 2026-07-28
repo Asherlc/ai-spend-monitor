@@ -254,6 +254,11 @@ public final class AppModel {
     )
   }
 
+  public var menuBarAccessibilityLabel: String? {
+    guard let progress = menuBarBudgetProgress else { return nil }
+    return "\(statusTitle), \(progress.accessibilityLabel)"
+  }
+
   public var headlineTitle: String {
     availability == .unavailable
       ? "No current data"
