@@ -26,7 +26,7 @@ AI Spend requires macOS 14 Sonoma or later and currently displays USD only.
 - Provider and model-level breakdowns
 - Clear labels for provider-reported actuals and local-log estimates
 - Month-end projections based on spend so far
-- Budget exhaustion forecasts based on the current burn rate
+- Budget progress bars and exhaustion forecasts based on the current burn rate
 - Multiple independent monthly budgets
 - Native notifications when projected spend moves off pace
 - Provider-specific freshness and diagnostics

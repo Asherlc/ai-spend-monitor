@@ -130,6 +130,16 @@ private struct BudgetEditorRow: View {
         Text(pacingText)
           .font(.caption)
           .foregroundStyle(.secondary)
+        if let usageFraction = evaluation?.usageFraction {
+          ProgressView(value: usageFraction)
+            .progressViewStyle(.linear)
+            .tint(progressColor)
+            .frame(maxWidth: 220)
+            .accessibilityLabel("Budget used")
+            .accessibilityValue(
+              SpendFormatting.share(Decimal(usageFraction))
+            )
+        }
       }
 
       Spacer()
@@ -163,6 +173,10 @@ private struct BudgetEditorRow: View {
     let direction = margin.amount >= 0 ? "under" : "over"
     let amount = Money(abs(margin.amount))
     return "\(detail) · \(SpendFormatting.currency(amount)) \(direction)"
+  }
+
+  private var progressColor: Color {
+    evaluation?.state == .offPace ? .orange : .accentColor
   }
 
   private func saveAmount() {

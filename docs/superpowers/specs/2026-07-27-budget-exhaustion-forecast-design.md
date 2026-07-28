@@ -79,7 +79,9 @@ to share the calculation.
 ## UI
 
 The popover budget row keeps its current title and right-aligned projected
-under/over amount. Its secondary state label becomes:
+under/over amount. A linear progress bar shows current spend against the
+budget and clamps to completely full at 100% or above. Its secondary state
+label becomes:
 
 - `Budget reached`
 - `Projected to reach Aug 18`
@@ -87,8 +89,12 @@ under/over amount. Its secondary state label becomes:
 - `Collecting pace`
 - `No current data`
 
-The settings budget row uses the same forecast label alongside its existing
-pacing and margin details. No new controls or settings are added.
+The settings budget row uses the same forecast label and progress bar alongside
+its existing pacing and margin details. No new controls or settings are added.
+
+The menu-bar budget circle remains visible at 100% or above and uses a native
+filled symbol for the completed state so macOS does not drop the custom
+full-circle stroke from the status-item label.
 
 Concrete dates use the user's current locale and timezone. The label includes
 the month and day so it remains understandable near a month boundary.

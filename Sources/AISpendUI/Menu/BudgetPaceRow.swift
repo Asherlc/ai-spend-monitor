@@ -9,22 +9,33 @@ public struct BudgetPaceRow: View {
   }
 
   public var body: some View {
-    HStack(spacing: 10) {
-      Image(systemName: symbol)
-        .foregroundStyle(color)
-        .accessibilityHidden(true)
-      VStack(alignment: .leading, spacing: 2) {
-        Text("\(SpendFormatting.currency(evaluation.limit)) budget")
-          .font(.callout.weight(.medium))
-        Text(stateLabel)
-          .font(.caption)
-          .foregroundStyle(.secondary)
+    VStack(alignment: .leading, spacing: 5) {
+      HStack(spacing: 10) {
+        Image(systemName: symbol)
+          .foregroundStyle(color)
+          .accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 2) {
+          Text("\(SpendFormatting.currency(evaluation.limit)) budget")
+            .font(.callout.weight(.medium))
+          Text(stateLabel)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        if let margin = evaluation.projectedMargin {
+          Text(marginText(margin))
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(margin.amount >= 0 ? .secondary : color)
+        }
       }
-      Spacer()
-      if let margin = evaluation.projectedMargin {
-        Text(marginText(margin))
-          .font(.caption.monospacedDigit())
-          .foregroundStyle(margin.amount >= 0 ? .secondary : color)
+      if let usageFraction = evaluation.usageFraction {
+        ProgressView(value: usageFraction)
+          .progressViewStyle(.linear)
+          .tint(color)
+          .accessibilityLabel("Budget used")
+          .accessibilityValue(
+            SpendFormatting.share(Decimal(usageFraction))
+          )
       }
     }
     .accessibilityElement(children: .combine)

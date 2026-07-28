@@ -257,6 +257,7 @@ final class AppModelTests: XCTestCase {
 
     XCTAssertEqual(model.menuBarBudgetProgress?.fraction, 1)
     XCTAssertEqual(model.menuBarBudgetProgress?.percentage, 150)
+    XCTAssertEqual(model.menuBarBudgetProgress?.isComplete, true)
     XCTAssertEqual(
       model.menuBarBudgetProgress?.accessibilityLabel,
       "150% of $50.00 budget used"

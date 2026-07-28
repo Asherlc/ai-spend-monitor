@@ -28,6 +28,7 @@ final class PacingEngineTests: XCTestCase {
       result.budgets.first?.exhaustionForecast,
       .projected(start.addingTimeInterval(225_000))
     )
+    XCTAssertEqual(result.budgets.first?.usageFraction, 0.8)
   }
 
   func testTreatsExhaustionAtMonthEndAsLastingThroughMonth() {
@@ -79,6 +80,7 @@ final class PacingEngineTests: XCTestCase {
     )
 
     XCTAssertEqual(result.budgets.first?.exhaustionForecast, .reached)
+    XCTAssertEqual(result.budgets.first?.usageFraction, 1)
   }
 
   func testZeroSpendLastsThroughMonth() {

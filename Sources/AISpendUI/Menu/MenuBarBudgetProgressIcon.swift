@@ -11,6 +11,10 @@ public struct MenuBarBudgetProgress: Equatable, Sendable {
     "\(SpendFormatting.share(percentage / 100)) of \(SpendFormatting.currency(limit)) budget used"
   }
 
+  public var isComplete: Bool {
+    fraction >= 1
+  }
+
   public init(
     fraction: Double,
     percentage: Decimal,
@@ -30,21 +34,28 @@ public struct MenuBarBudgetProgressIcon: View {
   }
 
   public var body: some View {
-    ZStack {
-      Circle()
-        .stroke(lineWidth: 1.5)
-        .opacity(0.25)
-      Circle()
-        .trim(from: 0, to: progress.fraction)
-        .stroke(
-          style: StrokeStyle(
-            lineWidth: 2,
-            lineCap: .round
-          )
-        )
-        .rotationEffect(.degrees(-90))
-      Text("$")
-        .font(.system(size: 10, weight: .semibold, design: .rounded))
+    Group {
+      if progress.isComplete {
+        Image(systemName: "dollarsign.circle.fill")
+          .font(.system(size: 16, weight: .semibold))
+      } else {
+        ZStack {
+          Circle()
+            .stroke(lineWidth: 1.5)
+            .opacity(0.25)
+          Circle()
+            .trim(from: 0, to: progress.fraction)
+            .stroke(
+              style: StrokeStyle(
+                lineWidth: 2,
+                lineCap: .round
+              )
+            )
+            .rotationEffect(.degrees(-90))
+          Text("$")
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
+        }
+      }
     }
     .frame(width: 18, height: 18)
     .accessibilityElement(children: .ignore)
