@@ -69,10 +69,10 @@ final class FireworksAdapterTests: XCTestCase {
 
     let result = try await adapter.fetch(window: juneWindow())
 
-    XCTAssertEqual(result.records.map(\.model), ["kimi-k2", "kimi-k2"])
+    XCTAssertEqual(result.records.map(\.model), ["models/kimi-k2", "models/kimi-k2"])
     XCTAssertEqual(
       Dictionary(grouping: result.records, by: \.model).mapValues(\.count),
-      ["kimi-k2": 2]
+      ["models/kimi-k2": 2]
     )
     let persistedRecords = try JSONEncoder().encode(result.records)
     let output = [
@@ -86,52 +86,76 @@ final class FireworksAdapterTests: XCTestCase {
     }
   }
 
-  func testQualifiedModelIdentifierAlsoRedactsEmbeddedAccountID() async throws {
-    let account = FireworksAccount(
-      resourceName: "accounts/tenant-private-id",
-      id: "tenant-private-id"
-    )
-    let adapter = makeAdapter(account: account) { _, _, _, _ in
-      fireworksResult(
-        amount: 1,
-        model: "accounts/tenant-private-id/models/tenant-private-id-fine-tune"
+  func testOrdinaryModelContainingAccountIDSubstringIsUnchanged() async throws {
+    let adapter = makeAdapter(
+      account: FireworksAccount(resourceName: "accounts/work", id: "work")
+    ) { _, _, _, _ in
+      fireworksResult(amount: 1, model: "network-model")
+    }
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(result.records.map(\.model), ["network-model"])
+  }
+
+  func testModelNormalizationAndObservationIDIgnoreUnrelatedSiblingAccounts() async throws {
+    let primary = FireworksAccount(resourceName: "accounts/personal", id: "personal")
+    let sibling = FireworksAccount(resourceName: "accounts/work", id: "work")
+
+    func fetch(accounts: [FireworksAccount]) async throws -> SpendRecord {
+      let adapter = FireworksAdapter(
+        credential: { Secret("fw_secret") },
+        accounts: { _ in accounts },
+        costs: { account, _, _, _ in
+          account.id == primary.id
+            ? fireworksResult(amount: 1, model: "network-model")
+            : fireworksResult(amount: 0)
+        },
+        fingerprinter: AccountFingerprinter(key: Data(repeating: 5, count: 32)),
+        now: { juneDate() }
+      )
+      let result = try await adapter.fetch(window: juneWindow())
+      return try XCTUnwrap(result.records.first)
+    }
+
+    let withoutSibling = try await fetch(accounts: [primary])
+    let withSibling = try await fetch(accounts: [primary, sibling])
+
+    XCTAssertEqual(withSibling.model, withoutSibling.model)
+    XCTAssertEqual(withSibling.id, withoutSibling.id)
+    XCTAssertEqual(withSibling.observationID, withoutSibling.observationID)
+  }
+
+  func testModelAndRouterResourcesCanonicalizeWithoutOwnerPath() async throws {
+    let owner = "tenant-private"
+    let adapter = makeAdapter(
+      account: FireworksAccount(resourceName: "accounts/\(owner)", id: owner)
+    ) { _, _, _, _ in
+      FireworksCostResult(
+        rows: [
+          FireworksCostRow(
+            start: juneWindow().start,
+            end: juneWindow().start.addingTimeInterval(86_400),
+            model: "accounts/\(owner)/models/kimi-k2",
+            amount: 1
+          ),
+          FireworksCostRow(
+            start: juneWindow().start,
+            end: juneWindow().start.addingTimeInterval(86_400),
+            model: "accounts/\(owner)/routers/fast",
+            amount: 1
+          ),
+        ],
+        subtotal: 2
       )
     }
 
     let result = try await adapter.fetch(window: juneWindow())
 
-    XCTAssertEqual(result.records.map(\.model), ["[account]-fine-tune"])
-    XCTAssertFalse(String(describing: result.records).contains("tenant-private-id"))
-  }
-
-  func testModelCanonicalizationUsesEveryDiscoveredAccountIdentity() async throws {
-    let accounts = [
-      FireworksAccount(resourceName: "accounts/tenant-alpha-private", id: "tenant-alpha-private"),
-      FireworksAccount(resourceName: "accounts/tenant-beta-private", id: "tenant-beta-private"),
-    ]
-    let adapter = FireworksAdapter(
-      credential: { Secret("fw_secret") },
-      accounts: { _ in accounts },
-      costs: { _, _, _, _ in
-        fireworksResult(
-          amount: 1,
-          model: "accounts/tenant-beta-private/models/tenant-beta-private-kimi-k2"
-        )
-      },
-      fingerprinter: AccountFingerprinter(key: Data(repeating: 5, count: 32)),
-      now: { juneDate() }
-    )
-
-    let result = try await adapter.fetch(window: juneWindow())
-
-    XCTAssertEqual(result.records.map(\.model), ["[account]-kimi-k2", "[account]-kimi-k2"])
-    XCTAssertEqual(
-      Dictionary(grouping: result.records, by: \.model).mapValues(\.count),
-      ["[account]-kimi-k2": 2]
-    )
+    XCTAssertEqual(result.records.map(\.model), ["models/kimi-k2", "routers/fast"])
     try assertNoFireworksIdentity(
       in: result,
-      rawValues: accounts.flatMap { [$0.id, $0.resourceName] }
+      rawValues: [owner, "accounts/\(owner)"]
     )
   }
 
@@ -414,6 +438,25 @@ final class FireworksAdapterTests: XCTestCase {
     } catch {
       XCTFail("Expected CancellationError, got \(error)")
     }
+  }
+
+  func testCancellationMarkedBySuccessfulClockStopsBeforeCredentialDiscovery() async {
+    let credentialInvocations = LockedInt()
+    let adapter = FireworksAdapter(
+      credential: {
+        credentialInvocations.increment()
+        return Secret("fw_secret")
+      },
+      accounts: { _ in [] },
+      costs: { _, _, _, _ in fireworksResult(amount: 0) },
+      now: {
+        withUnsafeCurrentTask { $0?.cancel() }
+        return juneDate()
+      }
+    )
+
+    await assertCancellation(from: adapter, seam: "successful clock")
+    XCTAssertEqual(credentialInvocations.value, 0)
   }
 
   func testCancellationMarkedBySuccessfulCostDependencyIsRethrown() async {

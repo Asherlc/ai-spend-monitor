@@ -57,6 +57,7 @@ public struct FireworksAdapter: ProviderAdapter {
   public func fetch(window: MonthWindow) async throws -> ProviderFetchResult {
     try Task.checkCancellation()
     let fetchedAt = now()
+    try Task.checkCancellation()
     var attempts: [SourceAttempt] = []
 
     let resolvedCredential: Secret
@@ -200,7 +201,6 @@ public struct FireworksAdapter: ProviderAdapter {
           try Task.checkCancellation()
           let normalized = try normalize(
             result,
-            accounts: discoveredAccounts,
             accountFingerprint: fingerprint,
             sourceID: sourceID,
             scope: scope,
@@ -280,7 +280,6 @@ public struct FireworksAdapter: ProviderAdapter {
 
   private func normalize(
     _ result: FireworksCostResult,
-    accounts: [FireworksAccount],
     accountFingerprint: String,
     sourceID: String,
     scope: FireworksCostScope,
@@ -293,7 +292,7 @@ public struct FireworksAdapter: ProviderAdapter {
     }
 
     var normalized = try result.rows.map {
-      let model = Self.privacySafeModel($0.model, accounts: accounts)
+      let model = FireworksModelIdentity($0.model)?.canonicalModel ?? "unknown"
       return try record(
         start: $0.start,
         end: $0.end,
@@ -380,31 +379,6 @@ public struct FireworksAdapter: ProviderAdapter {
       return false
     }
     return status == 401 || status == 403
-  }
-
-  private static func privacySafeModel(
-    _ model: String,
-    accounts: [FireworksAccount]
-  ) -> String {
-    let components = model.split(separator: "/", omittingEmptySubsequences: false)
-    let label: String
-    if components.first == "accounts" {
-      guard
-        let modelsIndex = components.firstIndex(of: "models"),
-        modelsIndex > components.startIndex,
-        components.index(after: modelsIndex) < components.endIndex
-      else {
-        return "unknown"
-      }
-      let modelComponents = components[components.index(after: modelsIndex)...]
-      guard !modelComponents.contains(where: \.isEmpty) else {
-        return "unknown"
-      }
-      label = modelComponents.joined(separator: "/")
-    } else {
-      label = model
-    }
-    return redactAccountIdentities(in: label, accounts: accounts)
   }
 
   private static func redactAccountIdentities(

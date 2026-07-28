@@ -91,6 +91,164 @@ final class SpendReconcilerTests: XCTestCase {
     XCTAssertEqual(result.excludedEstimatedAmount, .zero)
   }
 
+  func testClaudeFireworksModelEstimateIsExcludedByMatchingActual() throws {
+    let start = Date(timeIntervalSince1970: 1_704_067_200)
+    let end = start.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      accountFingerprint: "fireworks-account",
+      model: "models/kimi-k2",
+      start: start,
+      end: end,
+      amount: 10,
+      quality: .actual
+    )
+    let estimate = try record(
+      id: "claude-estimate",
+      model: "accounts/fireworks/models/kimi-k2",
+      start: start,
+      end: end,
+      amount: 12,
+      quality: .estimated
+    )
+
+    let result = SpendReconciler().reconcile([estimate, actual])
+
+    XCTAssertEqual(result.included.map(\.id), [actual.id])
+    XCTAssertEqual(result.included.map(\.amount), [Money(10)])
+    XCTAssertEqual(result.excludedRecordIDs, [estimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, Money(12))
+  }
+
+  func testClaudeFireworksRouterEstimateIsExcludedByMatchingActual() throws {
+    let start = Date(timeIntervalSince1970: 1_704_067_200)
+    let end = start.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "routers/kimi-k2",
+      start: start,
+      end: end,
+      amount: 8,
+      quality: .actual
+    )
+    let estimate = try record(
+      id: "claude-estimate",
+      model: "accounts/fireworks/routers/kimi-k2",
+      start: start,
+      end: end,
+      amount: 9,
+      quality: .estimated
+    )
+
+    let result = SpendReconciler().reconcile([estimate, actual])
+
+    XCTAssertEqual(result.included.map(\.id), [actual.id])
+    XCTAssertEqual(result.excludedRecordIDs, [estimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, Money(9))
+  }
+
+  func testClaudeFireworksEstimateRemainsWithoutActualData() throws {
+    let start = Date(timeIntervalSince1970: 1_704_067_200)
+    let end = start.addingTimeInterval(86_400)
+    let estimate = try record(
+      id: "claude-estimate",
+      model: "accounts/fireworks/models/kimi-k2",
+      start: start,
+      end: end,
+      amount: 9,
+      quality: .estimated
+    )
+
+    let result = SpendReconciler().reconcile([estimate])
+
+    XCTAssertEqual(result.included.map(\.id), [estimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, .zero)
+  }
+
+  func testClaudeFireworksEstimateRemainsForAdjacentActualInterval() throws {
+    let dayOne = Date(timeIntervalSince1970: 1_704_067_200)
+    let dayTwo = dayOne.addingTimeInterval(86_400)
+    let dayThree = dayTwo.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "models/kimi-k2",
+      start: dayOne,
+      end: dayTwo,
+      amount: 8,
+      quality: .actual
+    )
+    let estimate = try record(
+      id: "claude-estimate",
+      model: "accounts/fireworks/models/kimi-k2",
+      start: dayTwo,
+      end: dayThree,
+      amount: 9,
+      quality: .estimated
+    )
+
+    let result = SpendReconciler().reconcile([estimate, actual])
+
+    XCTAssertEqual(result.included.map(\.id), [actual.id, estimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, .zero)
+  }
+
+  func testClaudeFireworksEstimateRemainsForDifferentCanonicalModel() throws {
+    let start = Date(timeIntervalSince1970: 1_704_067_200)
+    let end = start.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "models/deepseek-v3",
+      start: start,
+      end: end,
+      amount: 8,
+      quality: .actual
+    )
+    let estimate = try record(
+      id: "claude-estimate",
+      model: "accounts/fireworks/models/kimi-k2",
+      start: start,
+      end: end,
+      amount: 9,
+      quality: .estimated
+    )
+
+    let result = SpendReconciler().reconcile([estimate, actual])
+
+    XCTAssertEqual(Set(result.included.map(\.id)), [actual.id, estimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, .zero)
+  }
+
+  func testOrdinaryClaudeModelNeverReconcilesAgainstFireworksActual() throws {
+    let start = Date(timeIntervalSince1970: 1_704_067_200)
+    let end = start.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "kimi-k2",
+      start: start,
+      end: end,
+      amount: 8,
+      quality: .actual
+    )
+    let estimate = try record(
+      id: "claude-estimate",
+      model: "kimi-k2",
+      start: start,
+      end: end,
+      amount: 9,
+      quality: .estimated
+    )
+
+    let result = SpendReconciler().reconcile([estimate, actual])
+
+    XCTAssertEqual(Set(result.included.map(\.id)), [actual.id, estimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, .zero)
+  }
+
   func testAdjacentEstimateDoesNotIntersectActualHalfOpenCoverage() throws {
     let dayOne = Date(timeIntervalSince1970: 1_704_067_200)
     let dayTwo = dayOne.addingTimeInterval(86_400)
