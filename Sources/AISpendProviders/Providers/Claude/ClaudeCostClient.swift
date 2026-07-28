@@ -1,11 +1,6 @@
 import AISpendCore
 import Foundation
 
-enum ProviderClientError: Error, Equatable, Sendable {
-  case httpStatus(Int)
-  case invalidResponse
-}
-
 enum ClaudeCredential: Sendable {
   case adminKey(Secret)
   case bearerToken(Secret)
