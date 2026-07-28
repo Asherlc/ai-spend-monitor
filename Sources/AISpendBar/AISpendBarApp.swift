@@ -187,7 +187,7 @@ private enum SelfCheckError: Error {
 }
 
 @MainActor
-private enum AppEnvironment {
+enum AppEnvironment {
   static func makeModel() -> AppModel {
     let recovery = BootstrapRecovery()
     let initialSnapshot: RefreshSnapshot
@@ -218,8 +218,8 @@ private enum AppEnvironment {
   static func installProviderDefaultsIfNeeded(
     in repository: SwiftDataLedgerRepository
   ) throws {
-    guard try repository.providerStates().isEmpty else { return }
-    for descriptor in ProviderDescriptor.builtIns {
+    let states = try repository.providerStates()
+    for descriptor in ProviderDescriptor.builtIns where states[descriptor.id] == nil {
       try repository.saveProviderState(
         StoredProviderState(
           provider: descriptor.id,
@@ -394,6 +394,7 @@ private final class BootstrapRecovery {
       CursorAdapter(browserDiscovery: browserDiscovery),
       ClaudeAdapter(scanner: ClaudeLogScanner(priceCatalog: catalog)),
       OpenAIAdapter(scanner: CodexLogScanner(priceCatalog: catalog)),
+      FireworksAdapter(),
     ]
     let clock = LiveClock()
     let calendarProvider: @Sendable () -> Calendar = {

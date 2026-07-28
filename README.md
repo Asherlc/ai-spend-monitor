@@ -2,8 +2,8 @@
 
 AI Spend is a native, menu-bar-only macOS app that combines your current
 calendar-month metered AI spend in one place. It reads supported Cursor,
-Claude, and Codex/OpenAI sources, keeps actual and estimated charges distinct,
-projects month-end spend, and warns when a budget falls off pace.
+Claude, Codex/OpenAI, and Fireworks sources, keeps actual and estimated charges
+distinct, projects month-end spend, and warns when a budget falls off pace.
 
 AI Spend requires macOS 14 Sonoma or later and currently displays USD only.
 
@@ -60,7 +60,7 @@ GitHub Release, and replace the existing app in `/Applications`.
 
 ## First-run setup
 
-All three providers are enabled by default. Open **Settings → Providers** to
+All four providers are enabled by default. Open **Settings → Providers** to
 disable sources you do not use. A disabled provider is excluded from totals and
 does not perform credential, file, browser, subprocess, or network discovery.
 
@@ -74,6 +74,7 @@ require an appropriately scoped provider credential:
 | Cursor | `CURSOR_ADMIN_API_KEY` | Latest `team-usage-events-*.csv` dashboard export (actual) |
 | Claude | `ANTHROPIC_ADMIN_KEY`, or `ANTHROPIC_OAUTH_TOKEN` as a fallback | Supported Claude Code logs |
 | Codex/OpenAI | `OPENAI_ADMIN_KEY` | Supported Codex logs |
+| Fireworks | FireConnect Keychain login, or `FIREWORKS_API_KEY` | Authenticated-user rated costs when account-wide permission is unavailable |
 
 Ordinary CLI logins often authorize product use without granting organization
 billing access. In that case, the CLI can work while actual spend remains
@@ -159,6 +160,31 @@ Codex session logs are scanned for uncovered estimates. OpenAI dashboard-session
 billing is not supported.
 
 Usage-limit percentages are not converted into dollar spend.
+
+### Fireworks
+
+Install FireConnect with its
+[official installer](https://docs.fireworks.ai/ecosystem/fireconnect/overview#install),
+then run:
+
+```bash
+fireconnect login
+```
+
+AI Spend reuses that Keychain login and combines rated costs from every
+Fireworks account the authenticated user can access. If an account does not
+grant account-wide usage permission, AI Spend falls back to the authenticated
+user's personal scope and marks the provider as partial so the limitation is
+visible. Fireworks billing data may be delayed by several minutes.
+
+Claude Code can route requests through Fireworks while also recording local
+estimates. When a Claude Code log explicitly names a Fireworks model or router
+resource and matching Fireworks actual usage overlaps it, AI Spend keeps the
+Fireworks actual cost and excludes the Claude estimate to avoid double
+counting. Plain model names and estimates without matching overlapping
+Fireworks actual data remain included.
+
+Fireworks usage billed through Microsoft Foundry/Azure is not included.
 
 ## Privacy
 

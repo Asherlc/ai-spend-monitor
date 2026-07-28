@@ -129,7 +129,7 @@ extension ProviderID {
     case .cursor: URL(string: "https://cursor.com/dashboard")
     case .claude: URL(string: "https://console.anthropic.com/settings/billing")
     case .openAI: URL(string: "https://platform.openai.com/usage")
-    case .fireworks: nil
+    case .fireworks: URL(string: "https://app.fireworks.ai/usage")
     }
   }
 }

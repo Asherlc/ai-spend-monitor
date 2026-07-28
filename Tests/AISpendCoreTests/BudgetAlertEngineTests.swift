@@ -317,6 +317,43 @@ final class BudgetAlertEngineTests: XCTestCase {
     XCTAssertEqual(result.decisions.first?.localDay, "2026-07-15")
   }
 
+  func testBodyNamesFireworksWhenItIsLargestProvider() {
+    let budget = budget(limit: 500)
+    let fireworksSummary = MonthlySummary(
+      total: Money(125.5),
+      actual: Money(125.5),
+      estimated: .zero,
+      providers: [
+        ProviderSpendSummary(
+          id: .fireworks,
+          actual: Money(125.5),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      isPartial: false
+    )
+    let result = BudgetAlertEngine().evaluate(
+      pacing: pacing(
+        projection: Money(750.25),
+        evaluations: [evaluation(budget, state: .offPace)]
+      ),
+      summary: fireworksSummary,
+      budgets: [budget],
+      storedStates: [
+        budget.id: StoredBudgetAlertState(
+          budgetID: budget.id,
+          lastPacingState: .onPace
+        )
+      ],
+      now: localDate(2026, 7, 15, 10),
+      calendar: calendar,
+      allDataIsStale: false
+    )
+
+    XCTAssertTrue(result.decisions.first?.body.contains("Fireworks") == true)
+  }
+
   func testDecisionsConvenienceReturnsOnlyNotificationDecisions() {
     let budget = budget(limit: 500)
     let decisions = BudgetAlertEngine().decisions(
