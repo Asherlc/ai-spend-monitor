@@ -307,4 +307,3 @@ personal-scope behavior/spec changes.
 rtk git add Tests/AISpendCoreTests/RefreshCoordinatorTests.swift Tests/AISpendUITests/AppModelTests.swift README.md
 rtk git commit -m "docs: explain Fireworks personal spend scope"
 ```
-
