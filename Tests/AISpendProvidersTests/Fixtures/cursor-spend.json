@@ -1,0 +1,23 @@
+{
+  "teamMemberSpend": [
+    {
+      "fastPremiumRequests": 10,
+      "name": "Member One",
+      "email": "member-one@example.invalid",
+      "spendCents": 325.125,
+      "role": "member",
+      "hardLimitOverrideDollars": 0
+    },
+    {
+      "fastPremiumRequests": 5,
+      "name": "Member Two",
+      "email": "member-two@example.invalid",
+      "spendCents": 175,
+      "role": "member",
+      "hardLimitOverrideDollars": 0
+    }
+  ],
+  "subscriptionCycleStart": 1780272000000,
+  "totalMembers": 3,
+  "totalPages": 2
+}

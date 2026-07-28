@@ -66,12 +66,13 @@ disable sources you do not use. A disabled provider is excluded from totals and
 does not perform credential, file, browser, subprocess, or network discovery.
 
 Claude Code and Codex can estimate supported local usage from their session
-logs without an organization billing credential. Actual organization spend
-requires an appropriately scoped provider credential:
+logs without an organization billing credential. Cursor can use the latest
+matching dashboard usage export in `~/Downloads`. Organization billing APIs
+require an appropriately scoped provider credential:
 
-| Provider | Actual spend credential | Local estimate |
+| Provider | Organization billing credential | Fallback source |
 | --- | --- | --- |
-| Cursor | `CURSOR_ADMIN_API_KEY` | Not available |
+| Cursor | `CURSOR_ADMIN_API_KEY` | Latest `team-usage-events-*.csv` dashboard export (actual) |
 | Claude | `ANTHROPIC_ADMIN_KEY`, or `ANTHROPIC_OAUTH_TOKEN` as a fallback | Supported Claude Code logs |
 | Codex/OpenAI | `OPENAI_ADMIN_KEY` | Supported Codex logs |
 
@@ -135,9 +136,11 @@ is created.
 ### Cursor
 
 `CURSOR_ADMIN_API_KEY` supplies actual team spend and model attribution through
-Cursor's documented Admin API. An existing Cursor app session can be detected
-for diagnostics, but Cursor does not expose a documented app-session billing
-endpoint. There is no local-log estimate fallback.
+Cursor's documented Admin API. Without that key, AI Spend reads the newest
+`team-usage-events-*.csv` dashboard export in `~/Downloads` as an actual,
+model-attributed fallback. Re-export month-to-date usage from Cursor to update
+it. An existing Cursor app session can be detected for diagnostics, but Cursor
+does not expose a documented app-session billing endpoint.
 
 ### Claude
 
@@ -168,8 +171,10 @@ Deleting the app does not automatically delete this directory.
 AI Spend has no analytics or telemetry. It does not ask you to paste
 credentials and does not copy credentials, browser cookies, or tokens into its
 ledger. Credential and browser discovery is limited to known provider
-locations, and network access is restricted to provider domains. Browser
-discovery can be disabled globally.
+locations, and network access is restricted to provider domains. Its
+account-fingerprinting key is a random, permission-restricted file in the same
+private app data directory, so routine refreshes do not require Keychain
+approval. Browser discovery can be disabled globally.
 
 Diagnostics sanitize failure descriptions. Authorization headers, cookies,
 keys, query secrets, email addresses, and account identifiers are redacted.
