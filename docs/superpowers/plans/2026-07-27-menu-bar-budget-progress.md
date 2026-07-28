@@ -398,39 +398,12 @@ rtk git commit -m "feat: derive menu bar budget progress"
 **Files:**
 - Modify: `Sources/AISpendUI/Menu/MenuBarBudgetProgressIcon.swift`
 - Modify: `Sources/AISpendBar/AISpendBarApp.swift`
-- Test: `Tests/AISpendUITests/AppModelTests.swift`
 
 **Interfaces:**
 - Consumes: `MenuBarBudgetProgress` and `AppModel.menuBarBudgetProgress`
 - Produces: `public struct MenuBarBudgetProgressIcon: View` and a `MenuBarExtra` label that chooses the ring or existing `statusSymbol`
 
-- [ ] **Step 1: Add a compile-time usage test for the public icon view**
-
-Add this test to `AppModelTests`:
-
-```swift
-func testMenuBarProgressIconCanRenderDerivedProgress() {
-  let progress = MenuBarBudgetProgress(
-    fraction: 0.4,
-    percentage: 40,
-    limit: Money(50)
-  )
-
-  _ = MenuBarBudgetProgressIcon(progress: progress).body
-}
-```
-
-- [ ] **Step 2: Run the focused test and verify the red state**
-
-Run:
-
-```bash
-rtk swift test --filter AppModelTests/testMenuBarProgressIconCanRenderDerivedProgress
-```
-
-Expected: compilation fails because `MenuBarBudgetProgressIcon` is not defined.
-
-- [ ] **Step 3: Implement the compact monochrome progress icon**
+- [ ] **Step 1: Implement the compact monochrome progress icon**
 
 Append this view to `MenuBarBudgetProgressIcon.swift`:
 
@@ -466,17 +439,7 @@ public struct MenuBarBudgetProgressIcon: View {
 }
 ```
 
-- [ ] **Step 4: Run the focused test and verify green**
-
-Run:
-
-```bash
-rtk swift test --filter AppModelTests/testMenuBarProgressIconCanRenderDerivedProgress
-```
-
-Expected: the icon usage test passes.
-
-- [ ] **Step 5: Select the progress view in the `MenuBarExtra` label**
+- [ ] **Step 2: Select the progress view in the `MenuBarExtra` label**
 
 Replace the existing `Label(model.statusTitle, systemImage: model.statusSymbol)` with:
 
@@ -492,7 +455,7 @@ Label {
 }
 ```
 
-- [ ] **Step 6: Run all automated verification**
+- [ ] **Step 3: Run all automated verification**
 
 Run:
 
@@ -504,7 +467,7 @@ rtk swift build
 
 Expected: all tests pass, formatting lint reports no violations, and the app builds successfully.
 
-- [ ] **Step 7: Review the final branch diff**
+- [ ] **Step 4: Review the final branch diff**
 
 Run:
 
@@ -516,11 +479,11 @@ rtk git status --short
 
 Expected: no whitespace errors; the branch contains the integrated application plus the focused progress feature; only `.superpowers/` may remain untracked.
 
-- [ ] **Step 8: Commit the rendered progress indicator**
+- [ ] **Step 5: Commit the rendered progress indicator**
 
 Run:
 
 ```bash
-rtk git add Sources/AISpendUI/Menu/MenuBarBudgetProgressIcon.swift Sources/AISpendBar/AISpendBarApp.swift Tests/AISpendUITests/AppModelTests.swift
+rtk git add Sources/AISpendUI/Menu/MenuBarBudgetProgressIcon.swift Sources/AISpendBar/AISpendBarApp.swift
 rtk git commit -m "feat: show budget progress in menu bar"
 ```
