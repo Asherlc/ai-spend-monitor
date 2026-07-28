@@ -104,6 +104,67 @@ final class FireworksAdapterTests: XCTestCase {
     XCTAssertFalse(String(describing: result.records).contains("tenant-private-id"))
   }
 
+  func testModelCanonicalizationUsesEveryDiscoveredAccountIdentity() async throws {
+    let accounts = [
+      FireworksAccount(resourceName: "accounts/tenant-alpha-private", id: "tenant-alpha-private"),
+      FireworksAccount(resourceName: "accounts/tenant-beta-private", id: "tenant-beta-private"),
+    ]
+    let adapter = FireworksAdapter(
+      credential: { Secret("fw_secret") },
+      accounts: { _ in accounts },
+      costs: { _, _, _, _ in
+        fireworksResult(
+          amount: 1,
+          model: "accounts/tenant-beta-private/models/tenant-beta-private-kimi-k2"
+        )
+      },
+      fingerprinter: AccountFingerprinter(key: Data(repeating: 5, count: 32)),
+      now: { juneDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(result.records.map(\.model), ["[account]-kimi-k2", "[account]-kimi-k2"])
+    XCTAssertEqual(
+      Dictionary(grouping: result.records, by: \.model).mapValues(\.count),
+      ["[account]-kimi-k2": 2]
+    )
+    try assertNoFireworksIdentity(
+      in: result,
+      rawValues: accounts.flatMap { [$0.id, $0.resourceName] }
+    )
+  }
+
+  func testAccountDiagnosticRedactsEveryDiscoveredAccountIdentity() async throws {
+    let accounts = [
+      FireworksAccount(resourceName: "accounts/tenant-alpha-private", id: "tenant-alpha-private"),
+      FireworksAccount(resourceName: "accounts/tenant-beta-private", id: "tenant-beta-private"),
+    ]
+    let adapter = FireworksAdapter(
+      credential: { Secret("fw_secret") },
+      accounts: { _ in accounts },
+      costs: { account, _, _, _ in
+        if account.id == "tenant-alpha-private" {
+          throw NSError(
+            domain: "failed for accounts/tenant-beta-private id=tenant-beta-private",
+            code: 1
+          )
+        }
+        return fireworksResult(amount: 2)
+      },
+      fingerprinter: AccountFingerprinter(key: Data(repeating: 6, count: 32)),
+      now: { juneDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(result.records.map(\.amount), [Money(2)])
+    try assertNoFireworksIdentity(
+      in: result,
+      rawValues: accounts.flatMap { [$0.id, $0.resourceName] }
+    )
+  }
+
   func testAccountAuthorizationFailureFallsBackToPersonalAndMarksPartial() async throws {
     let scopes = FireworksScopeRecorder()
     let adapter = makeAdapter(
@@ -454,6 +515,29 @@ final class FireworksAdapterTests: XCTestCase {
       XCTAssertTrue(true)
     } catch {
       XCTFail("Expected CancellationError from \(seam), got \(error)")
+    }
+  }
+
+  private func assertNoFireworksIdentity(
+    in result: ProviderFetchResult,
+    rawValues: [String],
+    file: StaticString = #filePath,
+    line: UInt = #line
+  ) throws {
+    let persistedRecords = try JSONEncoder().encode(result.records)
+    let output = [
+      String(decoding: persistedRecords, as: UTF8.self),
+      String(describing: result.attempts),
+      String(describing: result.coverage),
+      String(describing: result.refreshedSourceIDs),
+    ].joined(separator: "\n")
+    for rawValue in rawValues {
+      XCTAssertFalse(
+        output.contains(rawValue),
+        "Leaked raw Fireworks identity: \(rawValue)",
+        file: file,
+        line: line
+      )
     }
   }
 

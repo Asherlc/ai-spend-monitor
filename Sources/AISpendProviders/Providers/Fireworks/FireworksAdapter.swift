@@ -159,7 +159,7 @@ public struct FireworksAdapter: ProviderAdapter {
                 redactedMessage: safeMessage(
                   for: error,
                   credential: resolvedCredential,
-                  account: account
+                  accounts: discoveredAccounts
                 )
               )
             )
@@ -185,7 +185,7 @@ public struct FireworksAdapter: ProviderAdapter {
                   redactedMessage: safeMessage(
                     for: error,
                     credential: resolvedCredential,
-                    account: account
+                    accounts: discoveredAccounts
                   )
                 )
               )
@@ -199,7 +199,7 @@ public struct FireworksAdapter: ProviderAdapter {
           try Task.checkCancellation()
           let normalized = try normalize(
             result,
-            account: account,
+            accounts: discoveredAccounts,
             accountFingerprint: fingerprint,
             sourceID: sourceID,
             scope: scope,
@@ -229,7 +229,7 @@ public struct FireworksAdapter: ProviderAdapter {
                 redactedMessage: safeMessage(
                   for: error,
                   credential: resolvedCredential,
-                  account: account
+                  accounts: discoveredAccounts
                 )
               )
             )
@@ -247,7 +247,7 @@ public struct FireworksAdapter: ProviderAdapter {
               redactedMessage: safeMessage(
                 for: error,
                 credential: resolvedCredential,
-                account: account
+                accounts: discoveredAccounts
               )
             )
           )
@@ -279,7 +279,7 @@ public struct FireworksAdapter: ProviderAdapter {
 
   private func normalize(
     _ result: FireworksCostResult,
-    account: FireworksAccount,
+    accounts: [FireworksAccount],
     accountFingerprint: String,
     sourceID: String,
     scope: FireworksCostScope,
@@ -292,7 +292,7 @@ public struct FireworksAdapter: ProviderAdapter {
     }
 
     var normalized = try result.rows.map {
-      let model = Self.privacySafeModel($0.model, account: account)
+      let model = Self.privacySafeModel($0.model, accounts: accounts)
       return try record(
         start: $0.start,
         end: $0.end,
@@ -383,7 +383,7 @@ public struct FireworksAdapter: ProviderAdapter {
 
   private static func privacySafeModel(
     _ model: String,
-    account: FireworksAccount
+    accounts: [FireworksAccount]
   ) -> String {
     let components = model.split(separator: "/", omittingEmptySubsequences: false)
     let label: String
@@ -403,16 +403,30 @@ public struct FireworksAdapter: ProviderAdapter {
     } else {
       label = model
     }
-    guard !account.id.isEmpty else {
-      return label
+    return redactAccountIdentities(in: label, accounts: accounts)
+  }
+
+  private static func redactAccountIdentities(
+    in value: String,
+    accounts: [FireworksAccount]
+  ) -> String {
+    let identities = Set(
+      accounts.flatMap { [$0.resourceName, $0.id] }.filter { !$0.isEmpty }
+    ).sorted {
+      if $0.count == $1.count {
+        return $0 < $1
+      }
+      return $0.count > $1.count
     }
-    return label.replacingOccurrences(of: account.id, with: "[account]")
+    return identities.reduce(value) {
+      $0.replacingOccurrences(of: $1, with: "[account]")
+    }
   }
 
   private func safeMessage(
     for error: Error,
     credential: Secret? = nil,
-    account: FireworksAccount? = nil
+    accounts: [FireworksAccount] = []
   ) -> String {
     let message: String
     switch error {
@@ -440,13 +454,7 @@ public struct FireworksAdapter: ProviderAdapter {
         sanitized.replacingOccurrences(of: $0, with: "[REDACTED]")
       }
     }
-    if let account {
-      sanitized =
-        sanitized
-        .replacingOccurrences(of: account.resourceName, with: "[REDACTED]")
-        .replacingOccurrences(of: account.id, with: "[REDACTED]")
-    }
-    return sanitized
+    return Self.redactAccountIdentities(in: sanitized, accounts: accounts)
   }
 }
 
