@@ -1,0 +1,35 @@
+{
+  "rows": [
+    {
+      "dimensions": {
+        "startTime": "2026-06-01T00:00:00Z",
+        "model": "accounts/fireworks/models/kimi-k2",
+        "unknownModel": false
+      },
+      "subtotal": {
+        "currencyCode": "USD",
+        "units": "1",
+        "nanos": 250000000
+      }
+    },
+    {
+      "dimensions": {
+        "startTime": "2026-06-02T00:00:00Z",
+        "unknownModel": true
+      },
+      "subtotal": {
+        "currencyCode": "USD",
+        "units": "0",
+        "nanos": 750000000
+      }
+    }
+  ],
+  "nextPageToken": "cost-page-2",
+  "subtotal": {
+    "currencyCode": "USD",
+    "units": "3",
+    "nanos": 0
+  },
+  "evaluationTime": "2026-06-03T00:05:00Z",
+  "attributionCompleteness": "COMPLETE"
+}

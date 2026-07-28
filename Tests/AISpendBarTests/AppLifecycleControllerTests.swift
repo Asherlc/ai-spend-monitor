@@ -1,11 +1,37 @@
 import AISpendCore
 import AISpendUI
+import SwiftData
 import XCTest
 
 @testable import AISpendBar
 
 @MainActor
 final class AppLifecycleControllerTests: XCTestCase {
+  func testProviderDefaultsBackfillOnlyMissingFireworksState() throws {
+    let schema = Schema([
+      SpendRecordEntity.self,
+      ProviderStateEntity.self,
+      BudgetEntity.self,
+      BudgetAlertStateEntity.self,
+    ])
+    let configuration = ModelConfiguration(isStoredInMemoryOnly: true)
+    let container = try ModelContainer(
+      for: schema,
+      configurations: [configuration]
+    )
+    let repository = SwiftDataLedgerRepository(modelContainer: container)
+    try repository.saveProviderState(
+      StoredProviderState(provider: .claude, isEnabled: false)
+    )
+
+    try AppEnvironment.installProviderDefaultsIfNeeded(in: repository)
+
+    let states = try repository.providerStates()
+    XCTAssertFalse(try XCTUnwrap(states[.claude]).isEnabled)
+    XCTAssertTrue(try XCTUnwrap(states[.fireworks]).isEnabled)
+    XCTAssertEqual(Set(states.keys), Set(ProviderID.allCases))
+  }
+
   func testStartLaunchesOnceAndSchedulesPeriodicRefreshWithoutDuplicateLoops() async throws {
     var reasons: [RefreshReason] = []
     let lifecycle = AppLifecycleController(

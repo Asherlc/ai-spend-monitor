@@ -5,6 +5,15 @@ import XCTest
 
 @MainActor
 final class SettingsModelTests: XCTestCase {
+  func testFireworksProviderPresentationMetadata() {
+    XCTAssertEqual(ProviderID.fireworks.displayName, "Fireworks")
+    XCTAssertEqual(ProviderID.fireworks.symbolName, "flame.fill")
+    XCTAssertEqual(
+      ProviderID.fireworks.dashboardURL,
+      URL(string: "https://app.fireworks.ai/usage")
+    )
+  }
+
   func testDisablingProviderPersistsBeforeRefreshAndReenableUsesProviderRefreshReason() async {
     let store = SettingsStoreSpy()
     let model = makeModel(store: store)

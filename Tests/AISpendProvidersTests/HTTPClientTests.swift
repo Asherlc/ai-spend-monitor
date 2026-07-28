@@ -41,6 +41,20 @@ final class HTTPClientTests: XCTestCase {
     XCTAssertEqual(received.cachePolicy, .reloadIgnoringLocalCacheData)
   }
 
+  func testAllowsExactFireworksAPIHost() async throws {
+    TestURLProtocol.state.setMode(.success)
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [TestURLProtocol.self]
+    let client = HTTPClient(configuration: configuration)
+    let request = URLRequest(
+      url: URL(string: "https://api.fireworks.ai/v1/accounts")!
+    )
+
+    let (_, response) = try await client.data(for: request)
+
+    XCTAssertEqual(response.statusCode, 200)
+  }
+
   func testURLSessionDoesNotFollowRedirectOutsideExactAllowlist() async throws {
     let attackerURL = URL(string: "https://attacker.test/steal")!
     TestURLProtocol.state.setMode(.redirect(attackerURL))

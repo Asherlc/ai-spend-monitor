@@ -24,6 +24,7 @@ public protocol LedgerRepository: AnyObject {
     records: [SpendRecord],
     provider: ProviderID,
     refreshedSourceIDs: Set<String>,
+    sourceAuthority: ProviderSourceAuthority,
     interval: MonthWindow,
     state: StoredProviderState
   ) throws
@@ -203,6 +204,7 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
     records: [SpendRecord],
     provider: ProviderID,
     refreshedSourceIDs: Set<String>,
+    sourceAuthority: ProviderSourceAuthority,
     interval: MonthWindow,
     state: StoredProviderState
   ) throws {
@@ -242,7 +244,14 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
       }
     )
     let scoped = try context.fetch(scopedDescriptor)
-    let existing = scoped.filter { refreshedSourceIDs.contains($0.sourceID) }
+    let sourceIDsToReplace: Set<String>
+    switch sourceAuthority {
+    case .refreshedSources:
+      sourceIDsToReplace = refreshedSourceIDs
+    case .allProviderSources:
+      sourceIDsToReplace = refreshedSourceIDs.union(scoped.map(\.sourceID))
+    }
+    let existing = scoped.filter { sourceIDsToReplace.contains($0.sourceID) }
     let collisions = try context.fetch(FetchDescriptor<SpendRecordEntity>())
       .filter { replacementIDs.contains($0.recordID) }
     guard
@@ -267,7 +276,7 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
     let existingBySource = Dictionary(grouping: existing, by: \.sourceID)
 
     try performMutation {
-      for (index, sourceID) in refreshedSourceIDs.sorted().enumerated() {
+      for (index, sourceID) in sourceIDsToReplace.sorted().enumerated() {
         try beforeStagingSource(index, sourceID)
         for entity in existingBySource[sourceID, default: []] {
           context.delete(entity)

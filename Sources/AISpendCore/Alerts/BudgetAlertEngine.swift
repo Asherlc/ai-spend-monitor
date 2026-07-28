@@ -277,6 +277,8 @@ public struct BudgetAlertEngine: Sendable {
       "Claude"
     case .openAI:
       "OpenAI"
+    case .fireworks:
+      "Fireworks"
     }
   }
 

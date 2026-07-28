@@ -41,14 +41,18 @@ public struct SpendReconciler: Sendable {
       grouping: deduplicated.filter { $0.quality == .actual },
       by: BillingGroup.init(record:)
     )
+    let fireworksActuals = deduplicated.filter {
+      $0.quality == .actual && $0.provider == .fireworks
+    }
     var included: [SpendRecord] = []
 
     for record in deduplicated {
       let isCoveredEstimate =
         record.quality == .estimated
-        && actualCoverage[BillingGroup(record: record), default: []].contains {
+        && (actualCoverage[BillingGroup(record: record), default: []].contains {
           Self.intersects(record, $0)
         }
+          || Self.isClaudeFireworksEstimate(record, coveredBy: fireworksActuals))
 
       if isCoveredEstimate {
         excludedEstimatedAmount = excludedEstimatedAmount + record.amount
@@ -68,6 +72,24 @@ public struct SpendReconciler: Sendable {
 
   private static func intersects(_ lhs: SpendRecord, _ rhs: SpendRecord) -> Bool {
     lhs.intervalStart < rhs.intervalEnd && rhs.intervalStart < lhs.intervalEnd
+  }
+
+  private static func isClaudeFireworksEstimate(
+    _ estimate: SpendRecord,
+    coveredBy actuals: [SpendRecord]
+  ) -> Bool {
+    guard
+      estimate.provider == .claude,
+      let identity = FireworksModelIdentity(estimate.model),
+      identity.isResource
+    else {
+      return false
+    }
+    return actuals.contains {
+      $0.model == identity.canonicalModel
+        && $0.fetchedAt == estimate.fetchedAt
+        && intersects(estimate, $0)
+    }
   }
 
   private static func prefersForDuplicateObservation(

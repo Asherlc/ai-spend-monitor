@@ -22,6 +22,7 @@ public enum SpendAvailability: Hashable, Sendable {
 
 public enum ProviderFreshnessStatus: Hashable, Sendable {
   case fresh
+  case partial(age: TimeInterval, message: String)
   case stale(age: TimeInterval)
   case cachedAfterFailure(age: TimeInterval, message: String)
   case unavailable(message: String)
@@ -351,8 +352,17 @@ public final class AppModel {
 
   public func dailySpend(for provider: ProviderID) -> [DailySpendPoint] {
     let calendar = Calendar.current
-    let providerRecords = records.filter { $0.provider == provider }
-    let reconciled = SpendReconciler().reconcile(providerRecords).included
+    let enabledProviders =
+      snapshot.providerStates.isEmpty
+      ? Set(snapshot.summary.providers.map(\.id))
+      : Set(
+        snapshot.providerStates.values.filter(\.isEnabled).map(\.provider)
+      )
+    let enabledRecords = records.filter {
+      enabledProviders.contains($0.provider)
+    }
+    let reconciled = SpendReconciler().reconcile(enabledRecords).included
+      .filter { $0.provider == provider }
     let grouped = Dictionary(
       grouping: reconciled
     ) { calendar.startOfDay(for: $0.intervalStart) }
@@ -663,10 +673,27 @@ public final class AppModel {
       )
     }
     let age = max(0, snapshot.evaluatedAt.timeIntervalSince(success))
+    if age > 30 * 60 {
+      return ProviderStatus(
+        lastAttemptAt: state.lastAttemptAt,
+        lastSuccessfulAt: success,
+        freshness: .stale(age: age)
+      )
+    }
+    if state.refreshStatus == .partial {
+      return ProviderStatus(
+        lastAttemptAt: state.lastAttemptAt,
+        lastSuccessfulAt: success,
+        freshness: .partial(
+          age: age,
+          message: failure ?? "Provider coverage is partial"
+        )
+      )
+    }
     return ProviderStatus(
       lastAttemptAt: state.lastAttemptAt,
       lastSuccessfulAt: success,
-      freshness: age > 30 * 60 ? .stale(age: age) : .fresh
+      freshness: .fresh
     )
   }
 

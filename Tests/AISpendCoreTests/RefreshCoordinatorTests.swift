@@ -150,6 +150,301 @@ final class RefreshCoordinatorTests: XCTestCase {
     XCTAssertEqual(openAIState.lastSuccessfulAt, now)
   }
 
+  func testCoordinatedRefreshStampsRecordsWithOneGenerationForCrossProviderReconciliation()
+    async throws
+  {
+    let repository = try makeRepository()
+    try enable([.claude, .fireworks], in: repository)
+    let estimate = try record(
+      id: "claude-estimate",
+      provider: .claude,
+      model: "accounts/fireworks/models/kimi-k2",
+      amount: 12,
+      sourceID: "claude-local",
+      quality: .estimated,
+      fetchedAt: now.addingTimeInterval(-120)
+    )
+    let actual = try record(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "models/kimi-k2",
+      amount: 10,
+      sourceID: "fireworks-cost",
+      fetchedAt: now.addingTimeInterval(-60)
+    )
+    let coordinator = makeCoordinator(
+      adapters: [
+        AdapterSpy(provider: .claude, result: .success([estimate])),
+        AdapterSpy(provider: .fireworks, result: .success([actual])),
+      ],
+      repository: repository
+    )
+
+    let snapshot = await coordinator.refresh(reason: .manual)
+
+    XCTAssertEqual(snapshot.summary.total, Money(10))
+    XCTAssertEqual(Set(try repository.records(in: month).map(\.fetchedAt)), [now])
+  }
+
+  func testFailedFireworksRefreshDoesNotUseRetainedActualToSuppressFreshClaudeEstimate()
+    async throws
+  {
+    let repository = try makeRepository()
+    try enable([.claude, .fireworks], in: repository)
+    let cachedActual = try record(
+      id: "cached-fireworks-actual",
+      provider: .fireworks,
+      model: "models/kimi-k2",
+      amount: 10,
+      sourceID: "fireworks-cost",
+      fetchedAt: now.addingTimeInterval(-60)
+    )
+    try repository.replace(
+      records: [cachedActual],
+      provider: .fireworks,
+      sourceID: cachedActual.sourceID,
+      interval: month
+    )
+    let estimate = try record(
+      id: "fresh-claude-estimate",
+      provider: .claude,
+      model: "accounts/fireworks/models/kimi-k2",
+      amount: 12,
+      sourceID: "claude-local",
+      quality: .estimated,
+      fetchedAt: now.addingTimeInterval(-120)
+    )
+    let coordinator = makeCoordinator(
+      adapters: [
+        AdapterSpy(provider: .claude, result: .success([estimate])),
+        AdapterSpy(
+          provider: .fireworks,
+          result: .failure(.message("Fireworks unavailable"))
+        ),
+      ],
+      repository: repository
+    )
+
+    let snapshot = await coordinator.refresh(reason: .manual)
+
+    XCTAssertEqual(snapshot.summary.total, Money(22))
+    XCTAssertEqual(
+      Dictionary(
+        uniqueKeysWithValues: try repository.records(in: month).map {
+          ($0.id, $0.fetchedAt)
+        }
+      ),
+      [
+        cachedActual.id: cachedActual.fetchedAt,
+        estimate.id: now,
+      ]
+    )
+  }
+
+  func testFailedFireworksResultPreservesCacheAndSpecificFailureContext() async throws {
+    let repository = try makeRepository()
+    let previousSuccess = now.addingTimeInterval(-60)
+    try repository.saveProviderState(
+      StoredProviderState(
+        provider: .fireworks,
+        isEnabled: true,
+        lastSuccessfulAt: previousSuccess,
+        refreshStatus: .success
+      )
+    )
+    let cached = try record(
+      id: "cached-fireworks",
+      provider: .fireworks,
+      amount: 7,
+      sourceID: "fireworks-account"
+    )
+    try repository.replace(
+      records: [cached],
+      provider: .fireworks,
+      sourceID: cached.sourceID,
+      interval: month
+    )
+    let fetchedAt = now
+    let adapter = AdapterSpy(provider: .fireworks) { _ in
+      ProviderFetchResult(
+        provider: .fireworks,
+        records: [],
+        attempts: [
+          SourceAttempt(
+            strategyID: "fireworks-account-costs",
+            outcome: .failed(
+              redactedMessage: "Fireworks request failed (HTTP 500)."
+            )
+          )
+        ],
+        refreshedSourceIDs: [],
+        fetchedAt: fetchedAt,
+        coverage: .complete,
+        sourceAuthority: .refreshedSources
+      )
+    }
+    let coordinator = makeCoordinator(
+      adapters: [adapter],
+      repository: repository
+    )
+
+    let snapshot = await coordinator.refresh(reason: .manual)
+
+    XCTAssertEqual(try repository.records(in: month).map(\.id), [cached.id])
+    let state = try XCTUnwrap(snapshot.providerStates[.fireworks])
+    XCTAssertEqual(state.refreshStatus, .failed)
+    XCTAssertEqual(state.lastSuccessfulAt, previousSuccess)
+    XCTAssertEqual(
+      state.lastFailureMessage,
+      "Fireworks request failed (HTTP 500)."
+    )
+    XCTAssertTrue(snapshot.summary.isPartial)
+    XCTAssertEqual(snapshot.summary.total, Money(7))
+    guard case .failed(let message) = snapshot.attempts[.fireworks]?.last?.outcome else {
+      return XCTFail("Expected failed Fireworks attempt")
+    }
+    XCTAssertEqual(message, state.lastFailureMessage)
+  }
+
+  func testAllProviderSourceAuthorityPrunesSourcesMissingFromCompleteRefresh() async throws {
+    let repository = try makeRepository()
+    try enable([.fireworks], in: repository)
+    let retainedAccount = try record(
+      id: "old-retained",
+      provider: .fireworks,
+      amount: 3,
+      sourceID: "fireworks-retained"
+    )
+    let removedAccount = try record(
+      id: "old-removed",
+      provider: .fireworks,
+      amount: 4,
+      sourceID: "fireworks-removed"
+    )
+    for record in [retainedAccount, removedAccount] {
+      try repository.replace(
+        records: [record],
+        provider: .fireworks,
+        sourceID: record.sourceID,
+        interval: month
+      )
+    }
+    let replacement = try record(
+      id: "new-retained",
+      provider: .fireworks,
+      amount: 8,
+      sourceID: retainedAccount.sourceID
+    )
+    let fetchedAt = now
+    let adapter = AdapterSpy(provider: .fireworks) { _ in
+      ProviderFetchResult(
+        provider: .fireworks,
+        records: [replacement],
+        attempts: [],
+        refreshedSourceIDs: [replacement.sourceID],
+        fetchedAt: fetchedAt,
+        coverage: .complete,
+        sourceAuthority: .allProviderSources
+      )
+    }
+    let coordinator = makeCoordinator(adapters: [adapter], repository: repository)
+
+    _ = await coordinator.refresh(reason: .manual)
+
+    XCTAssertEqual(try repository.records(in: month).map(\.id), [replacement.id])
+  }
+
+  func testRefreshedSourceAuthorityRetainsUnknownSourcesAfterPartialRefresh() async throws {
+    let repository = try makeRepository()
+    try enable([.fireworks], in: repository)
+    let refreshedAccount = try record(
+      id: "old-refreshed",
+      provider: .fireworks,
+      amount: 3,
+      sourceID: "fireworks-refreshed"
+    )
+    let unknownAccount = try record(
+      id: "old-unknown",
+      provider: .fireworks,
+      amount: 4,
+      sourceID: "fireworks-unknown"
+    )
+    for record in [refreshedAccount, unknownAccount] {
+      try repository.replace(
+        records: [record],
+        provider: .fireworks,
+        sourceID: record.sourceID,
+        interval: month
+      )
+    }
+    let replacement = try record(
+      id: "new-refreshed",
+      provider: .fireworks,
+      amount: 8,
+      sourceID: refreshedAccount.sourceID
+    )
+    let fetchedAt = now
+    let adapter = AdapterSpy(provider: .fireworks) { _ in
+      ProviderFetchResult(
+        provider: .fireworks,
+        records: [replacement],
+        attempts: [],
+        refreshedSourceIDs: [replacement.sourceID],
+        fetchedAt: fetchedAt,
+        coverage: .partial(message: "Some account spend is unavailable."),
+        sourceAuthority: .refreshedSources
+      )
+    }
+    let coordinator = makeCoordinator(adapters: [adapter], repository: repository)
+
+    _ = await coordinator.refresh(reason: .manual)
+
+    XCTAssertEqual(
+      Set(try repository.records(in: month).map(\.id)),
+      [replacement.id, unknownAccount.id]
+    )
+  }
+
+  func testPartialProviderCoverageKeepsFreshRecordsAndMarksSummaryPartial() async throws {
+    let repository = try makeRepository()
+    try enable([.fireworks], in: repository)
+    let freshRecord = try record(
+      id: "fresh-fireworks",
+      provider: .fireworks,
+      amount: 4,
+      sourceID: "fireworks-self-costs"
+    )
+    let fetchedAt = now
+    let adapter = AdapterSpy(provider: .fireworks) { _ in
+      ProviderFetchResult(
+        provider: .fireworks,
+        records: [freshRecord],
+        attempts: [
+          SourceAttempt(
+            strategyID: "fireworks-self-costs",
+            outcome: .succeeded(recordCount: 1)
+          )
+        ],
+        refreshedSourceIDs: [freshRecord.sourceID],
+        fetchedAt: fetchedAt,
+        coverage: .partial(
+          message: "Only authenticated-user spend is available."
+        )
+      )
+    }
+    let coordinator = makeCoordinator(
+      adapters: [adapter],
+      repository: repository
+    )
+
+    let snapshot = await coordinator.refresh(reason: .manual)
+
+    XCTAssertEqual(snapshot.summary.total, Money(4))
+    XCTAssertTrue(snapshot.summary.isPartial)
+    XCTAssertEqual(snapshot.providerStates[.fireworks]?.refreshStatus, .partial)
+    XCTAssertEqual(snapshot.providerAvailability[.fireworks], .available)
+  }
+
   func testEveryEnabledAdapterUsesTwentySecondTimeout() async throws {
     let repository = try makeRepository()
     try enable([.claude, .openAI], in: repository)
@@ -852,23 +1147,25 @@ final class RefreshCoordinatorTests: XCTestCase {
   private func record(
     id: String,
     provider: ProviderID,
+    model: String = "model",
     amount: Decimal,
     sourceID: String,
     quality: SpendQuality = .actual,
-    observationID: String? = nil
+    observationID: String? = nil,
+    fetchedAt: Date? = nil
   ) throws -> SpendRecord {
     try SpendRecord(
       id: id,
       provider: provider,
       accountFingerprint: "account",
-      model: "model",
+      model: model,
       intervalStart: month.start,
       intervalEnd: month.start.addingTimeInterval(86_400),
       amount: Money(amount),
       quality: quality,
       sourceID: sourceID,
       observationID: observationID ?? "observation-\(id)",
-      fetchedAt: now,
+      fetchedAt: fetchedAt ?? now,
       estimate: nil
     )
   }
@@ -1249,6 +1546,7 @@ private final class ReadFailingRepository: LedgerRepository {
     records: [SpendRecord],
     provider: ProviderID,
     refreshedSourceIDs: Set<String>,
+    sourceAuthority: ProviderSourceAuthority,
     interval: MonthWindow,
     state: StoredProviderState
   ) throws {
@@ -1256,6 +1554,7 @@ private final class ReadFailingRepository: LedgerRepository {
       records: records,
       provider: provider,
       refreshedSourceIDs: refreshedSourceIDs,
+      sourceAuthority: sourceAuthority,
       interval: interval,
       state: state
     )

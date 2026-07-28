@@ -4,6 +4,7 @@ import SwiftData
 public enum ProviderRefreshStatus: String, Codable, Sendable {
   case never
   case success
+  case partial
   case failed
 }
 

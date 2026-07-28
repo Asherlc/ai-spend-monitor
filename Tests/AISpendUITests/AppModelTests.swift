@@ -85,6 +85,133 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.dailySpend(for: .claude).map(\.amount), [Money(10)])
   }
 
+  func testClaudeDailySpendExcludesRoutedEstimateCoveredByFireworksActual() throws {
+    let start = Date(timeIntervalSince1970: 1_728_000)
+    let generation = start.addingTimeInterval(3_600)
+    let estimate = try spendRecord(
+      id: "claude-estimate",
+      provider: .claude,
+      model: "accounts/fireworks/models/kimi-k2",
+      start: start,
+      amount: 8,
+      quality: .estimated,
+      source: "claude-logs",
+      fetchedAt: generation
+    )
+    let actual = try spendRecord(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "models/kimi-k2",
+      start: start,
+      amount: 10,
+      quality: .actual,
+      source: "fireworks-costs",
+      fetchedAt: generation
+    )
+    let snapshot = Self.snapshot(
+      total: 10,
+      providers: [
+        ProviderSpendSummary(
+          id: .fireworks,
+          actual: Money(10),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      providerStates: [
+        .claude: StoredProviderState(provider: .claude, isEnabled: true),
+        .fireworks: StoredProviderState(provider: .fireworks, isEnabled: true),
+      ]
+    )
+    let model = AppModel(
+      snapshot: snapshot,
+      refresh: { _ in snapshot },
+      records: { [estimate, actual] }
+    )
+
+    XCTAssertTrue(model.dailySpend(for: .claude).isEmpty)
+  }
+
+  func testClaudeDailySpendKeepsRoutedEstimateWhenFireworksIsDisabled() throws {
+    let start = Date(timeIntervalSince1970: 1_728_000)
+    let generation = start.addingTimeInterval(3_600)
+    let estimate = try spendRecord(
+      id: "claude-estimate",
+      provider: .claude,
+      model: "accounts/fireworks/models/kimi-k2",
+      start: start,
+      amount: 8,
+      quality: .estimated,
+      source: "claude-logs",
+      fetchedAt: generation
+    )
+    let actual = try spendRecord(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "models/kimi-k2",
+      start: start,
+      amount: 10,
+      quality: .actual,
+      source: "fireworks-costs",
+      fetchedAt: generation
+    )
+    let snapshot = Self.snapshot(
+      total: 8,
+      providers: [
+        ProviderSpendSummary(
+          id: .claude,
+          actual: .zero,
+          estimated: Money(8),
+          models: []
+        )
+      ],
+      providerStates: [
+        .claude: StoredProviderState(provider: .claude, isEnabled: true),
+        .fireworks: StoredProviderState(provider: .fireworks, isEnabled: false),
+      ]
+    )
+    let model = AppModel(
+      snapshot: snapshot,
+      refresh: { _ in snapshot },
+      records: { [estimate, actual] }
+    )
+
+    XCTAssertEqual(model.snapshot.summary.total, Money(8))
+    XCTAssertEqual(model.dailySpend(for: .claude).map(\.amount), [Money(8)])
+  }
+
+  func testClaudeDailySpendKeepsOrdinaryEstimateAlongsideFireworksActual() throws {
+    let start = Date(timeIntervalSince1970: 1_728_000)
+    let generation = start.addingTimeInterval(3_600)
+    let estimate = try spendRecord(
+      id: "claude-estimate",
+      provider: .claude,
+      model: "claude-sonnet",
+      start: start,
+      amount: 8,
+      quality: .estimated,
+      source: "claude-logs",
+      fetchedAt: generation
+    )
+    let actual = try spendRecord(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "claude-sonnet",
+      start: start,
+      amount: 10,
+      quality: .actual,
+      source: "fireworks-costs",
+      fetchedAt: generation
+    )
+    let model = AppModel(
+      snapshot: Self.updatedSnapshot,
+      refresh: { _ in Self.updatedSnapshot },
+      records: { [estimate, actual] }
+    )
+
+    XCTAssertEqual(model.dailySpend(for: .claude).map(\.amount), [Money(8)])
+  }
+
   func testNoDataSnapshotUsesUnavailableLabelsInsteadOfZeroDollars() {
     let noData = Self.snapshot(
       total: 0,
@@ -123,6 +250,43 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.statusTitle, "$0.00")
     XCTAssertEqual(model.headlineTitle, "$0.00")
     XCTAssertEqual(model.providerRows.first?.amountTitle, "$0.00")
+  }
+
+  func testPartialProviderStatePresentsLimitedFreshness() throws {
+    let success = Date(timeIntervalSince1970: 100)
+    let state = StoredProviderState(
+      provider: .fireworks,
+      isEnabled: true,
+      lastAttemptAt: success,
+      lastSuccessfulAt: success,
+      refreshStatus: .partial,
+      lastFailureMessage: "Only authenticated-user spend is available."
+    )
+    let snapshot = Self.snapshot(
+      total: 1,
+      providers: [
+        ProviderSpendSummary(
+          id: .fireworks,
+          actual: Money(1),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      providerStates: [.fireworks: state],
+      providerAvailability: [.fireworks: .available],
+      refreshedAt: success,
+      evaluatedAt: success
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    guard
+      case .partial(_, let message) = try XCTUnwrap(
+        model.providerRows.first
+      ).status.freshness
+    else {
+      return XCTFail("Expected limited provider freshness")
+    }
+    XCTAssertEqual(message, "Only authenticated-user spend is available.")
   }
 
   func testProviderRowsIncludeEnabledProviderWithoutCachedSpend() {
@@ -571,23 +735,26 @@ final class AppModelTests: XCTestCase {
 
   private func spendRecord(
     id: String,
+    provider: ProviderID = .claude,
+    model: String = "claude-sonnet",
     start: Date,
     amount: Decimal,
     quality: SpendQuality,
-    source: String
+    source: String,
+    fetchedAt: Date? = nil
   ) throws -> SpendRecord {
     try SpendRecord(
       id: id,
-      provider: .claude,
+      provider: provider,
       accountFingerprint: "account",
-      model: "claude-sonnet",
+      model: model,
       intervalStart: start,
       intervalEnd: start.addingTimeInterval(3_600),
       amount: Money(amount),
       quality: quality,
       sourceID: source,
       observationID: id,
-      fetchedAt: start,
+      fetchedAt: fetchedAt ?? start,
       estimate: nil
     )
   }

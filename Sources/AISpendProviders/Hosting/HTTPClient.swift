@@ -77,6 +77,7 @@ private enum HTTPRequestPolicy {
   static let allowedHosts: Set<String> = [
     "api.anthropic.com",
     "api.cursor.com",
+    "api.fireworks.ai",
     "api.openai.com",
   ]
 

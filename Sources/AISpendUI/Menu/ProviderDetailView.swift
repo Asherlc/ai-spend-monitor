@@ -210,6 +210,8 @@ public struct ProviderDetailView: View {
     switch presentation.status.freshness {
     case .fresh:
       "Fresh"
+    case .partial(let age, let message):
+      "Limited coverage · \(ageText(age)) old · \(message)"
     case .stale(let age):
       "Stale cache · \(ageText(age)) old"
     case .cachedAfterFailure(let age, let message):
@@ -222,7 +224,7 @@ public struct ProviderDetailView: View {
   private var freshnessColor: Color {
     switch presentation.status.freshness {
     case .fresh: .green
-    case .stale, .cachedAfterFailure, .unavailable: .orange
+    case .partial, .stale, .cachedAfterFailure, .unavailable: .orange
     }
   }
 

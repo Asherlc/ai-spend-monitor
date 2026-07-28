@@ -267,6 +267,16 @@ public final class RefreshCoordinator {
             in: sanitizedAttempts,
             refreshedAnySource: !result.refreshedSourceIDs.isEmpty
           )
+          let coverageMessage: String?
+          let refreshStatus: ProviderRefreshStatus
+          switch result.coverage {
+          case .complete:
+            coverageMessage = failureMessage
+            refreshStatus = failureMessage == nil ? .success : .failed
+          case .partial(let message):
+            coverageMessage = message
+            refreshStatus = .partial
+          }
           let state = StoredProviderState(
             provider: provider,
             isEnabled: current.isEnabled,
@@ -274,10 +284,15 @@ public final class RefreshCoordinator {
             lastSuccessfulAt: result.refreshedSourceIDs.isEmpty
               ? current.lastSuccessfulAt
               : activeNow,
-            refreshStatus: failureMessage == nil ? .success : .failed,
-            lastFailureMessage: failureMessage
+            refreshStatus: refreshStatus,
+            lastFailureMessage: coverageMessage
           )
-          try persist(result: result, state: state, in: activeWindow)
+          try persist(
+            result: result,
+            state: state,
+            in: activeWindow,
+            refreshGeneration: activeNow
+          )
           states[provider] = state
           attempts[provider] = sanitizedAttempts
         } catch {
@@ -453,7 +468,8 @@ public final class RefreshCoordinator {
   private func persist(
     result: ProviderFetchResult,
     state: StoredProviderState,
-    in window: MonthWindow
+    in window: MonthWindow,
+    refreshGeneration: Date
   ) throws {
     guard result.records.allSatisfy({ $0.provider == result.provider }) else {
       throw RefreshCoordinatorError.providerMismatch
@@ -462,10 +478,27 @@ public final class RefreshCoordinator {
     guard recordSourceIDs.isSubset(of: result.refreshedSourceIDs) else {
       throw RefreshCoordinatorError.unrefreshedRecordSource
     }
+    let records = try result.records.map {
+      try SpendRecord(
+        id: $0.id,
+        provider: $0.provider,
+        accountFingerprint: $0.accountFingerprint,
+        model: $0.model,
+        intervalStart: $0.intervalStart,
+        intervalEnd: $0.intervalEnd,
+        amount: $0.amount,
+        quality: $0.quality,
+        sourceID: $0.sourceID,
+        observationID: $0.observationID,
+        fetchedAt: refreshGeneration,
+        estimate: $0.estimate
+      )
+    }
     try repository.applyProviderRefresh(
-      records: result.records,
+      records: records,
       provider: result.provider,
       refreshedSourceIDs: result.refreshedSourceIDs,
+      sourceAuthority: result.sourceAuthority,
       interval: window,
       state: state
     )
@@ -642,7 +675,16 @@ public final class RefreshCoordinator {
       return .unavailable(message: "Provider has not refreshed")
     }
     let age = max(0, now.timeIntervalSince(lastSuccessfulAt))
-    return age > 30 * 60 ? .stale(age: age) : .fresh
+    if age > 30 * 60 {
+      return .stale(age: age)
+    }
+    if state.refreshStatus == .partial {
+      return .partial(
+        age: age,
+        message: state.lastFailureMessage ?? "Provider coverage is partial"
+      )
+    }
+    return .fresh
   }
 
   private func fallbackSnapshot(

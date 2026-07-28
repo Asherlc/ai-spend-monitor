@@ -1,0 +1,16 @@
+{
+  "accounts": [
+    {
+      "name": "accounts/personal",
+      "displayName": "Personal",
+      "email": "private@example.test"
+    },
+    {
+      "name": "accounts/work",
+      "displayName": "Work",
+      "email": "private-work@example.test"
+    }
+  ],
+  "nextPageToken": "accounts-page-2",
+  "totalSize": 2
+}
