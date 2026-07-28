@@ -352,7 +352,16 @@ public final class AppModel {
 
   public func dailySpend(for provider: ProviderID) -> [DailySpendPoint] {
     let calendar = Calendar.current
-    let reconciled = SpendReconciler().reconcile(records).included
+    let enabledProviders =
+      snapshot.providerStates.isEmpty
+      ? Set(snapshot.summary.providers.map(\.id))
+      : Set(
+        snapshot.providerStates.values.filter(\.isEnabled).map(\.provider)
+      )
+    let enabledRecords = records.filter {
+      enabledProviders.contains($0.provider)
+    }
+    let reconciled = SpendReconciler().reconcile(enabledRecords).included
       .filter { $0.provider == provider }
     let grouped = Dictionary(
       grouping: reconciled

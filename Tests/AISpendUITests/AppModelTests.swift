@@ -108,13 +108,76 @@ final class AppModelTests: XCTestCase {
       source: "fireworks-costs",
       fetchedAt: generation
     )
+    let snapshot = Self.snapshot(
+      total: 10,
+      providers: [
+        ProviderSpendSummary(
+          id: .fireworks,
+          actual: Money(10),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      providerStates: [
+        .claude: StoredProviderState(provider: .claude, isEnabled: true),
+        .fireworks: StoredProviderState(provider: .fireworks, isEnabled: true),
+      ]
+    )
     let model = AppModel(
-      snapshot: Self.updatedSnapshot,
-      refresh: { _ in Self.updatedSnapshot },
+      snapshot: snapshot,
+      refresh: { _ in snapshot },
       records: { [estimate, actual] }
     )
 
     XCTAssertTrue(model.dailySpend(for: .claude).isEmpty)
+  }
+
+  func testClaudeDailySpendKeepsRoutedEstimateWhenFireworksIsDisabled() throws {
+    let start = Date(timeIntervalSince1970: 1_728_000)
+    let generation = start.addingTimeInterval(3_600)
+    let estimate = try spendRecord(
+      id: "claude-estimate",
+      provider: .claude,
+      model: "accounts/fireworks/models/kimi-k2",
+      start: start,
+      amount: 8,
+      quality: .estimated,
+      source: "claude-logs",
+      fetchedAt: generation
+    )
+    let actual = try spendRecord(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "models/kimi-k2",
+      start: start,
+      amount: 10,
+      quality: .actual,
+      source: "fireworks-costs",
+      fetchedAt: generation
+    )
+    let snapshot = Self.snapshot(
+      total: 8,
+      providers: [
+        ProviderSpendSummary(
+          id: .claude,
+          actual: .zero,
+          estimated: Money(8),
+          models: []
+        )
+      ],
+      providerStates: [
+        .claude: StoredProviderState(provider: .claude, isEnabled: true),
+        .fireworks: StoredProviderState(provider: .fireworks, isEnabled: false),
+      ]
+    )
+    let model = AppModel(
+      snapshot: snapshot,
+      refresh: { _ in snapshot },
+      records: { [estimate, actual] }
+    )
+
+    XCTAssertEqual(model.snapshot.summary.total, Money(8))
+    XCTAssertEqual(model.dailySpend(for: .claude).map(\.amount), [Money(8)])
   }
 
   func testClaudeDailySpendKeepsOrdinaryEstimateAlongsideFireworksActual() throws {
