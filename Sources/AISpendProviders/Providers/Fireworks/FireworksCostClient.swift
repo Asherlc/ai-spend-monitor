@@ -31,8 +31,9 @@ struct FireworksCostClient: Sendable {
       guard pageCount < 100 else {
         throw ProviderClientError.invalidResponse
       }
-      let pageKey = pageToken ?? "<first>"
-      guard requestedPageTokens.insert(pageKey).inserted else {
+      if let pageToken,
+        !requestedPageTokens.insert(pageToken).inserted
+      {
         throw ProviderClientError.invalidResponse
       }
       pageCount += 1

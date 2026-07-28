@@ -62,6 +62,29 @@ final class FireworksCostClientTests: XCTestCase {
     XCTAssertEqual(requests.count, 2)
   }
 
+  func testAccountsAcceptsPageTokenMatchingFormerFirstPageSentinel() async throws {
+    let requests = RequestRecorder()
+    let client = FireworksCostClient(http: { request in
+      requests.append(request)
+      let body =
+        requests.count == 1
+        ? Data(#"{"accounts":[],"nextPageToken":"<first>"}"#.utf8)
+        : Data(#"{"accounts":[]}"#.utf8)
+      return (body, response(for: request, status: 200))
+    })
+
+    _ = try await client.accounts(credential: Secret("fw_secret"))
+
+    XCTAssertEqual(requests.count, 2)
+    let queryItems = try XCTUnwrap(
+      URLComponents(
+        url: requests.requests[1].url!,
+        resolvingAgainstBaseURL: false
+      )?.queryItems
+    )
+    XCTAssertEqual(queryItems.first { $0.name == "pageToken" }?.value, "<first>")
+  }
+
   func testAccountsRejectsMalformedResourceName() async {
     let client = FireworksCostClient(http: { request in
       return (
