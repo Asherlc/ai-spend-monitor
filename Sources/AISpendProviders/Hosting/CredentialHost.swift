@@ -48,6 +48,7 @@ public struct CredentialHost: Sendable {
     "ANTHROPIC_OAUTH_TOKEN",
     "CURSOR_ADMIN_API_KEY",
     "CURSOR_ACCESS_TOKEN",
+    "FIREWORKS_API_KEY",
     "OPENAI_API_KEY",
     "OPENAI_ADMIN_KEY",
   ]
@@ -56,6 +57,7 @@ public struct CredentialHost: Sendable {
     KeychainCredential(service: "Claude Code", account: "credentials"),
     KeychainCredential(service: "Codex", account: "auth"),
     KeychainCredential(service: "Cursor", account: "accessToken"),
+    KeychainCredential(service: "FireworksAI", account: "fireworks-api-key"),
   ]
 
   private let environment: [String: String]
