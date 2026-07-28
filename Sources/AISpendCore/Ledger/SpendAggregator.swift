@@ -2,6 +2,7 @@ import Foundation
 
 public enum Freshness: Hashable, Sendable {
   case fresh
+  case partial(age: TimeInterval, message: String)
   case stale(age: TimeInterval)
   case unavailable(message: String)
 }
@@ -41,7 +42,7 @@ public struct SpendAggregator: Sendable {
     let estimated = Self.total(includedRecords, quality: .estimated)
     let isPartial = enabledProviders.contains { provider in
       switch providerFreshness[provider] {
-      case .stale, .unavailable:
+      case .partial, .stale, .unavailable:
         true
       case .fresh, .none:
         false

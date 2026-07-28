@@ -1,5 +1,10 @@
 import Foundation
 
+public enum ProviderDataCoverage: Hashable, Sendable {
+  case complete
+  case partial(message: String)
+}
+
 public struct SourceAttempt: Hashable, Sendable {
   public let strategyID: String
   public let outcome: Outcome
@@ -22,19 +27,22 @@ public struct ProviderFetchResult: Sendable {
   public let attempts: [SourceAttempt]
   public let refreshedSourceIDs: Set<String>
   public let fetchedAt: Date
+  public let coverage: ProviderDataCoverage
 
   public init(
     provider: ProviderID,
     records: [SpendRecord],
     attempts: [SourceAttempt],
     refreshedSourceIDs: Set<String>,
-    fetchedAt: Date
+    fetchedAt: Date,
+    coverage: ProviderDataCoverage = .complete
   ) {
     self.provider = provider
     self.records = records
     self.attempts = attempts
     self.refreshedSourceIDs = refreshedSourceIDs
     self.fetchedAt = fetchedAt
+    self.coverage = coverage
   }
 }
 

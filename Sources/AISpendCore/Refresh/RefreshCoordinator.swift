@@ -267,6 +267,16 @@ public final class RefreshCoordinator {
             in: sanitizedAttempts,
             refreshedAnySource: !result.refreshedSourceIDs.isEmpty
           )
+          let coverageMessage: String?
+          let refreshStatus: ProviderRefreshStatus
+          switch result.coverage {
+          case .complete:
+            coverageMessage = failureMessage
+            refreshStatus = failureMessage == nil ? .success : .failed
+          case .partial(let message):
+            coverageMessage = message
+            refreshStatus = .partial
+          }
           let state = StoredProviderState(
             provider: provider,
             isEnabled: current.isEnabled,
@@ -274,8 +284,8 @@ public final class RefreshCoordinator {
             lastSuccessfulAt: result.refreshedSourceIDs.isEmpty
               ? current.lastSuccessfulAt
               : activeNow,
-            refreshStatus: failureMessage == nil ? .success : .failed,
-            lastFailureMessage: failureMessage
+            refreshStatus: refreshStatus,
+            lastFailureMessage: coverageMessage
           )
           try persist(result: result, state: state, in: activeWindow)
           states[provider] = state
@@ -642,7 +652,16 @@ public final class RefreshCoordinator {
       return .unavailable(message: "Provider has not refreshed")
     }
     let age = max(0, now.timeIntervalSince(lastSuccessfulAt))
-    return age > 30 * 60 ? .stale(age: age) : .fresh
+    if age > 30 * 60 {
+      return .stale(age: age)
+    }
+    if state.refreshStatus == .partial {
+      return .partial(
+        age: age,
+        message: state.lastFailureMessage ?? "Provider coverage is partial"
+      )
+    }
+    return .fresh
   }
 
   private func fallbackSnapshot(

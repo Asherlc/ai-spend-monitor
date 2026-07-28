@@ -432,6 +432,22 @@ final class LedgerRepositoryTests: XCTestCase {
     XCTAssertEqual(try repository.records(in: month), [stored])
   }
 
+  func testProviderStateRoundTripsPartialRefreshStatus() throws {
+    let repository = try makeRepository()
+    let state = StoredProviderState(
+      provider: .fireworks,
+      isEnabled: true,
+      lastAttemptAt: Date(timeIntervalSince1970: 200),
+      lastSuccessfulAt: Date(timeIntervalSince1970: 200),
+      refreshStatus: .partial,
+      lastFailureMessage: "Only authenticated-user spend is available."
+    )
+
+    try repository.saveProviderState(state)
+
+    XCTAssertEqual(try repository.providerStates()[.fireworks], state)
+  }
+
   func testFailedRefreshStateRetainsPriorSuccessfulRecords() throws {
     let repository = try makeRepository()
     let month = monthWindow()

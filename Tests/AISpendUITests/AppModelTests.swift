@@ -125,6 +125,41 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.providerRows.first?.amountTitle, "$0.00")
   }
 
+  func testPartialProviderStatePresentsLimitedFreshness() throws {
+    let success = Date(timeIntervalSince1970: 100)
+    let state = StoredProviderState(
+      provider: .fireworks,
+      isEnabled: true,
+      lastAttemptAt: success,
+      lastSuccessfulAt: success,
+      refreshStatus: .partial,
+      lastFailureMessage: "Only authenticated-user spend is available."
+    )
+    let snapshot = Self.snapshot(
+      total: 1,
+      providers: [
+        ProviderSpendSummary(
+          id: .fireworks,
+          actual: Money(1),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      providerStates: [.fireworks: state],
+      providerAvailability: [.fireworks: .available],
+      refreshedAt: success,
+      evaluatedAt: success
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    guard case .partial(_, let message) = try XCTUnwrap(
+      model.providerRows.first
+    ).status.freshness else {
+      return XCTFail("Expected limited provider freshness")
+    }
+    XCTAssertEqual(message, "Only authenticated-user spend is available.")
+  }
+
   func testProviderRowsIncludeEnabledProviderWithoutCachedSpend() {
     let failedClaude = StoredProviderState(
       provider: .claude,

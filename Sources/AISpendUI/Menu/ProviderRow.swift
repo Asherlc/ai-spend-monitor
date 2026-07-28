@@ -77,6 +77,8 @@ public struct ProviderRow: View {
     switch presentation.status.freshness {
     case .fresh:
       share
+    case .partial(let age, _):
+      "Limited · \(ageText(age))"
     case .stale(let age):
       "Stale · \(ageText(age))"
     case .cachedAfterFailure(let age, _):
@@ -89,7 +91,7 @@ public struct ProviderRow: View {
   private var statusColor: Color {
     switch presentation.status.freshness {
     case .fresh: .secondary
-    case .stale, .cachedAfterFailure, .unavailable: .orange
+    case .partial, .stale, .cachedAfterFailure, .unavailable: .orange
     }
   }
 
@@ -109,6 +111,7 @@ extension ProviderID {
     case .cursor: "cursorarrow.rays"
     case .claude: "sparkles"
     case .openAI: "brain.head.profile"
+    case .fireworks: "flame.fill"
     }
   }
 
@@ -117,6 +120,7 @@ extension ProviderID {
     case .cursor: .blue
     case .claude: .orange
     case .openAI: .green
+    case .fireworks: .red
     }
   }
 
@@ -125,6 +129,7 @@ extension ProviderID {
     case .cursor: URL(string: "https://cursor.com/dashboard")
     case .claude: URL(string: "https://console.anthropic.com/settings/billing")
     case .openAI: URL(string: "https://platform.openai.com/usage")
+    case .fireworks: nil
     }
   }
 }

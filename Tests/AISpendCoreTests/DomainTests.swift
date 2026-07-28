@@ -25,8 +25,11 @@ final class DomainTests: XCTestCase {
     XCTAssertThrowsError(try JSONDecoder().decode(SpendRecord.self, from: data))
   }
 
-  func testEveryFirstVersionProviderHasDescriptor() {
-    XCTAssertEqual(Set(ProviderID.allCases), [.cursor, .claude, .openAI])
+  func testEveryBuiltInProviderHasDescriptor() {
+    XCTAssertEqual(
+      Set(ProviderID.allCases),
+      [.cursor, .claude, .openAI, .fireworks]
+    )
     XCTAssertEqual(ProviderDescriptor.builtIns.map(\.id), ProviderID.allCases)
   }
 

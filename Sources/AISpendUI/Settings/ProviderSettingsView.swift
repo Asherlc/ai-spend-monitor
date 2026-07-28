@@ -106,6 +106,8 @@ public struct ProviderSettingsView: View {
       if hasActual { return "Actual available" }
       if hasEstimate { return "Estimate available" }
       return "Available"
+    case .partial:
+      return "Limited"
     case .stale:
       return "Stale"
     case .cachedAfterFailure:

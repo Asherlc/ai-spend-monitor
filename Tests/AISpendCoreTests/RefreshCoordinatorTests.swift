@@ -150,6 +150,46 @@ final class RefreshCoordinatorTests: XCTestCase {
     XCTAssertEqual(openAIState.lastSuccessfulAt, now)
   }
 
+  func testPartialProviderCoverageKeepsFreshRecordsAndMarksSummaryPartial() async throws {
+    let repository = try makeRepository()
+    try enable([.fireworks], in: repository)
+    let freshRecord = try record(
+      id: "fresh-fireworks",
+      provider: .fireworks,
+      amount: 4,
+      sourceID: "fireworks-self-costs"
+    )
+    let fetchedAt = now
+    let adapter = AdapterSpy(provider: .fireworks) { _ in
+      ProviderFetchResult(
+        provider: .fireworks,
+        records: [freshRecord],
+        attempts: [
+          SourceAttempt(
+            strategyID: "fireworks-self-costs",
+            outcome: .succeeded(recordCount: 1)
+          )
+        ],
+        refreshedSourceIDs: [freshRecord.sourceID],
+        fetchedAt: fetchedAt,
+        coverage: .partial(
+          message: "Only authenticated-user spend is available."
+        )
+      )
+    }
+    let coordinator = makeCoordinator(
+      adapters: [adapter],
+      repository: repository
+    )
+
+    let snapshot = await coordinator.refresh(reason: .manual)
+
+    XCTAssertEqual(snapshot.summary.total, Money(4))
+    XCTAssertTrue(snapshot.summary.isPartial)
+    XCTAssertEqual(snapshot.providerStates[.fireworks]?.refreshStatus, .partial)
+    XCTAssertEqual(snapshot.providerAvailability[.fireworks], .available)
+  }
+
   func testEveryEnabledAdapterUsesTwentySecondTimeout() async throws {
     let repository = try makeRepository()
     try enable([.claude, .openAI], in: repository)

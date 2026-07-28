@@ -22,6 +22,7 @@ public enum SpendAvailability: Hashable, Sendable {
 
 public enum ProviderFreshnessStatus: Hashable, Sendable {
   case fresh
+  case partial(age: TimeInterval, message: String)
   case stale(age: TimeInterval)
   case cachedAfterFailure(age: TimeInterval, message: String)
   case unavailable(message: String)
@@ -663,10 +664,27 @@ public final class AppModel {
       )
     }
     let age = max(0, snapshot.evaluatedAt.timeIntervalSince(success))
+    if age > 30 * 60 {
+      return ProviderStatus(
+        lastAttemptAt: state.lastAttemptAt,
+        lastSuccessfulAt: success,
+        freshness: .stale(age: age)
+      )
+    }
+    if state.refreshStatus == .partial {
+      return ProviderStatus(
+        lastAttemptAt: state.lastAttemptAt,
+        lastSuccessfulAt: success,
+        freshness: .partial(
+          age: age,
+          message: failure ?? "Provider coverage is partial"
+        )
+      )
+    }
     return ProviderStatus(
       lastAttemptAt: state.lastAttemptAt,
       lastSuccessfulAt: success,
-      freshness: age > 30 * 60 ? .stale(age: age) : .fresh
+      freshness: .fresh
     )
   }
 

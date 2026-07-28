@@ -2,6 +2,7 @@ public enum ProviderID: String, Codable, CaseIterable, Sendable {
   case cursor
   case claude
   case openAI = "openai"
+  case fireworks
 }
 
 public enum SpendQuality: String, Codable, Sendable {
@@ -22,5 +23,6 @@ public struct ProviderDescriptor: Hashable, Sendable {
     ProviderDescriptor(id: .cursor, displayName: "Cursor"),
     ProviderDescriptor(id: .claude, displayName: "Claude"),
     ProviderDescriptor(id: .openAI, displayName: "OpenAI"),
+    ProviderDescriptor(id: .fireworks, displayName: "Fireworks"),
   ]
 }
