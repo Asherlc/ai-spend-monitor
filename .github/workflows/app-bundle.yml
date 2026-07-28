@@ -17,10 +17,10 @@ jobs:
   release:
     name: Build and release macOS app bundle
     if: github.ref == 'refs/heads/master'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 20
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
 
     steps:
       - name: Check out repository
