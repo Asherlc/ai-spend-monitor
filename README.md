@@ -179,10 +179,12 @@ Spend's account spend integration requires a standard Fireworks API key
 `FIREWORKS_API_KEY`.
 
 AI Spend reuses that Keychain login and combines rated costs from every
-Fireworks account the authenticated user can access. If an account does not
-grant account-wide usage permission, AI Spend falls back to the authenticated
-user's personal scope and marks the provider as partial so the limitation is
-visible. Fireworks billing data may be delayed by several minutes.
+Fireworks account the authenticated user can access. AI Spend treats
+authenticated-user Fireworks costs as normal fresh coverage, which is the
+common personal-use setup. Provider diagnostics identify the source as personal
+spend. If another discovered account cannot be queried at either scope,
+Fireworks is marked partial; if every account fails, the refresh is marked
+failed. Fireworks billing data may be delayed by several minutes.
 
 Claude Code can route requests through Fireworks while also recording local
 estimates. When a Claude Code log explicitly names a Fireworks model or router

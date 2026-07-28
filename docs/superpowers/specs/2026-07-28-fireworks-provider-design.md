@@ -139,18 +139,33 @@ returns HTTP 401 or 403:
 1. Retry that account once with `scope: "SELF"` and the same day/model
    grouping.
 2. If `SELF` succeeds, include those actual records and add a diagnostic
-   stating that only authenticated-user spend is available for that account.
+   identifying the source as personal/authenticated-user spend.
 3. If `SELF` also fails, mark that account unavailable.
 
-The UI must not describe a successful `SELF` fallback as full account spend.
-Add a `ProviderFetchResult` coverage value with `complete` and `partial`
-states, defaulting to `complete` for existing adapters. The Fireworks adapter
-returns `partial` whenever at least one refreshed account is limited to
-personal scope or another account failed. If every account fails, it returns
-failure-bearing complete-coverage semantics with refreshed-source authority so
+AI Spend is a personal spend monitor, and most Fireworks users do not have
+account-administrator access. A successful `SELF` fallback is therefore normal,
+fresh Fireworks coverage—not a warning and not a partial combined total. The
+provider detail view exposes the personal scope as informational source
+metadata so it is not mistaken for organization-wide billing.
+
+The Fireworks adapter returns `partial` only when a discovered account remains
+unavailable after all applicable scope attempts while at least one sibling
+account succeeds. If every account fails, it returns failure-bearing
+complete-coverage semantics with refreshed-source authority so
 `RefreshCoordinator` records a failed refresh while retaining cached sources.
-For partial results, `RefreshCoordinator` keeps the returned records available
-but sets the combined summary's existing partial flag.
+For genuine partial results, `RefreshCoordinator` keeps successful records
+available and sets the combined summary's existing partial flag.
+
+The alternatives were:
+
+- keep `SELF` as limited coverage, which makes the common case look broken and
+  makes unrelated totals appear partial;
+- add a user-facing organization/personal mode switch, which adds configuration
+  without changing what credentials permit;
+- treat successful `SELF` as normal coverage with an informational scope note.
+
+The third option is selected because it matches the product's personal-spend
+purpose while remaining explicit about scope.
 
 ## Failure and Refresh Behavior
 
@@ -239,6 +254,10 @@ Tests will cover:
 - aggregation across multiple accounts;
 - one-account failure without loss of successful accounts;
 - `ACCOUNT` authorization failure followed by `SELF` success;
+- successful `SELF` fallback remains fresh/complete and exposes personal scope
+  only as informational source metadata;
+- a real per-account failure still produces partial coverage, and total failure
+  still produces failed refresh status;
 - full authorization failure and Fire Pass guidance;
 - non-USD rejection and error redaction;
 - disabled-provider behavior through the refresh coordinator;

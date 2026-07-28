@@ -782,19 +782,20 @@ public final class RefreshCoordinator {
     in attempts: [SourceAttempt],
     refreshedAnySource: Bool
   ) -> String? {
+    var firstUnavailableReason: String?
     for attempt in attempts {
       switch attempt.outcome {
       case .succeeded:
         continue
       case .unavailable(let reason):
-        if !refreshedAnySource {
-          return reason
+        if !refreshedAnySource && firstUnavailableReason == nil {
+          firstUnavailableReason = reason
         }
       case .failed(let message):
         return message
       }
     }
-    return nil
+    return firstUnavailableReason
   }
 
   private func sameEvaluationCalendar(
