@@ -155,10 +155,14 @@ private struct BudgetEditorRow: View {
       case .offPace: "Off pace"
       case .unknown: "No current data"
       }
-    guard let margin = evaluation.projectedMargin else { return state }
+    let forecast = evaluation.exhaustionForecast.map {
+      SpendFormatting.budgetForecast($0)
+    }
+    let detail = [state, forecast].compactMap { $0 }.joined(separator: " · ")
+    guard let margin = evaluation.projectedMargin else { return detail }
     let direction = margin.amount >= 0 ? "under" : "over"
     let amount = Money(abs(margin.amount))
-    return "\(state) · \(SpendFormatting.currency(amount)) \(direction)"
+    return "\(detail) · \(SpendFormatting.currency(amount)) \(direction)"
   }
 
   private func saveAmount() {
