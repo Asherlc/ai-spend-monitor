@@ -4,7 +4,7 @@
 
 **Goal:** Add Fireworks as a default-enabled AI Spend provider that reuses a FireConnect login and combines rated current-month costs across every accessible Fireworks account.
 
-**Architecture:** Extend the provider domain with persisted partial-coverage state, then add a Fireworks HTTP client and adapter behind the existing `ProviderAdapter` boundary. The adapter resolves the FireConnect Keychain credential, discovers accounts, fetches paginated day/model rated costs, falls back from account to self scope when necessary, and emits actual `SpendRecord` values into the existing ledger and aggregation pipeline.
+**Architecture:** Extend the provider domain with persisted partial-coverage state, then add a Fireworks HTTP client and adapter behind the existing `ProviderAdapter` boundary. The adapter resolves the FireConnect Keychain credential, discovers accounts, fetches paginated day/model rated costs, falls back from account to self-scope when necessary, and emits actual `SpendRecord` values into the existing ledger and aggregation pipeline.
 
 **Tech Stack:** Swift 6, SwiftUI, SwiftData, Foundation `URLSession`, Security Keychain, XCTest, Swift Package Manager, Fireworks REST APIs.
 
@@ -1027,6 +1027,11 @@ coverage = .partial(
   message: "Some Fireworks account spend is unavailable."
 )
 ```
+
+When every discovered account fails and no source refreshes, preserve the
+failed attempts but use complete-coverage semantics with
+`.refreshedSources` authority. This lets `RefreshCoordinator` persist a failed
+refresh without pruning cached account sources.
 
 Normalize each row with stable identifiers derived only from the fingerprint,
 dates, model, and scope:

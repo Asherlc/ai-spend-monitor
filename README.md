@@ -74,7 +74,7 @@ require an appropriately scoped provider credential:
 | Cursor | `CURSOR_ADMIN_API_KEY` | Latest `team-usage-events-*.csv` dashboard export (actual) |
 | Claude | `ANTHROPIC_ADMIN_KEY`, or `ANTHROPIC_OAUTH_TOKEN` as a fallback | Supported Claude Code logs |
 | Codex/OpenAI | `OPENAI_ADMIN_KEY` | Supported Codex logs |
-| Fireworks | FireConnect Keychain login, or `FIREWORKS_API_KEY` | Authenticated-user rated costs when account-wide permission is unavailable |
+| Fireworks | FireConnect Keychain login with a standard `fw_...` key, or `FIREWORKS_API_KEY` containing one | Authenticated-user rated costs when account-wide permission is unavailable |
 
 Ordinary CLI logins often authorize product use without granting organization
 billing access. In that case, the CLI can work while actual spend remains
@@ -163,13 +163,20 @@ Usage-limit percentages are not converted into dollar spend.
 
 ### Fireworks
 
-Install FireConnect with its
+FireConnect requires Node.js 18 or later. After installing Node.js, install
+FireConnect with its
 [official installer](https://docs.fireworks.ai/ecosystem/fireconnect/overview#install),
 then run:
 
 ```bash
 fireconnect login
 ```
+
+FireConnect also accepts Fire Pass keys (`fpk_...`) for supported inference
+routing, but those keys may not grant account discovery or spend access. AI
+Spend's account spend integration requires a standard Fireworks API key
+(`fw_...`) supplied through FireConnect or as the value of
+`FIREWORKS_API_KEY`.
 
 AI Spend reuses that Keychain login and combines rated costs from every
 Fireworks account the authenticated user can access. If an account does not

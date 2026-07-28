@@ -261,8 +261,11 @@ public struct FireworksAdapter: ProviderAdapter {
       }
     }
 
+    let everyAccountFailed = failedAccount && refreshedSourceIDs.isEmpty
     let coverage: ProviderDataCoverage
-    if failedAccount {
+    if everyAccountFailed {
+      coverage = .complete
+    } else if failedAccount {
       coverage = .partial(message: "Some Fireworks account spend is unavailable.")
     } else if usedPersonalScope {
       coverage = .partial(
@@ -279,7 +282,7 @@ public struct FireworksAdapter: ProviderAdapter {
       refreshedSourceIDs: refreshedSourceIDs,
       fetchedAt: fetchedAt,
       coverage: coverage,
-      sourceAuthority: coverage == .complete
+      sourceAuthority: coverage == .complete && !everyAccountFailed
         ? .allProviderSources
         : .refreshedSources
     )
@@ -298,13 +301,26 @@ public struct FireworksAdapter: ProviderAdapter {
       throw FireworksAdapterError.rowsExceedSubtotal
     }
 
-    var normalized = try result.rows.map {
-      let model = FireworksModelIdentity($0.model)?.canonicalModel ?? "unknown"
+    var rowOrder: [NormalizedRowKey] = []
+    var amountsByRow: [NormalizedRowKey: Decimal] = [:]
+    for row in result.rows {
+      let key = NormalizedRowKey(
+        start: row.start,
+        end: row.end,
+        model: FireworksModelIdentity(row.model)?.canonicalModel ?? "unknown"
+      )
+      if amountsByRow[key] == nil {
+        rowOrder.append(key)
+      }
+      amountsByRow[key, default: .zero] += row.amount
+    }
+
+    var normalized = try rowOrder.map { key in
       return try record(
-        start: $0.start,
-        end: $0.end,
-        model: model,
-        amount: $0.amount,
+        start: key.start,
+        end: key.end,
+        model: key.model,
+        amount: amountsByRow[key, default: .zero],
         accountFingerprint: accountFingerprint,
         sourceID: sourceID,
         scope: scope,
@@ -444,4 +460,10 @@ public struct FireworksAdapter: ProviderAdapter {
 
 private enum FireworksAdapterError: Error {
   case rowsExceedSubtotal
+}
+
+private struct NormalizedRowKey: Hashable {
+  let start: Date
+  let end: Date
+  let model: String
 }

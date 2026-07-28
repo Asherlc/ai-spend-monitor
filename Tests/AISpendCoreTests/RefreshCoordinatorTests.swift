@@ -241,6 +241,71 @@ final class RefreshCoordinatorTests: XCTestCase {
     )
   }
 
+  func testFailedFireworksResultPreservesCacheAndSpecificFailureContext() async throws {
+    let repository = try makeRepository()
+    let previousSuccess = now.addingTimeInterval(-60)
+    try repository.saveProviderState(
+      StoredProviderState(
+        provider: .fireworks,
+        isEnabled: true,
+        lastSuccessfulAt: previousSuccess,
+        refreshStatus: .success
+      )
+    )
+    let cached = try record(
+      id: "cached-fireworks",
+      provider: .fireworks,
+      amount: 7,
+      sourceID: "fireworks-account"
+    )
+    try repository.replace(
+      records: [cached],
+      provider: .fireworks,
+      sourceID: cached.sourceID,
+      interval: month
+    )
+    let fetchedAt = now
+    let adapter = AdapterSpy(provider: .fireworks) { _ in
+      ProviderFetchResult(
+        provider: .fireworks,
+        records: [],
+        attempts: [
+          SourceAttempt(
+            strategyID: "fireworks-account-costs",
+            outcome: .failed(
+              redactedMessage: "Fireworks request failed (HTTP 500)."
+            )
+          )
+        ],
+        refreshedSourceIDs: [],
+        fetchedAt: fetchedAt,
+        coverage: .complete,
+        sourceAuthority: .refreshedSources
+      )
+    }
+    let coordinator = makeCoordinator(
+      adapters: [adapter],
+      repository: repository
+    )
+
+    let snapshot = await coordinator.refresh(reason: .manual)
+
+    XCTAssertEqual(try repository.records(in: month).map(\.id), [cached.id])
+    let state = try XCTUnwrap(snapshot.providerStates[.fireworks])
+    XCTAssertEqual(state.refreshStatus, .failed)
+    XCTAssertEqual(state.lastSuccessfulAt, previousSuccess)
+    XCTAssertEqual(
+      state.lastFailureMessage,
+      "Fireworks request failed (HTTP 500)."
+    )
+    XCTAssertTrue(snapshot.summary.isPartial)
+    XCTAssertEqual(snapshot.summary.total, Money(7))
+    guard case .failed(let message) = snapshot.attempts[.fireworks]?.last?.outcome else {
+      return XCTFail("Expected failed Fireworks attempt")
+    }
+    XCTAssertEqual(message, state.lastFailureMessage)
+  }
+
   func testAllProviderSourceAuthorityPrunesSourcesMissingFromCompleteRefresh() async throws {
     let repository = try makeRepository()
     try enable([.fireworks], in: repository)

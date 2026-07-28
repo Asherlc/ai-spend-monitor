@@ -198,6 +198,24 @@ struct FireworksCostClient: Sendable {
 private struct FireworksAccountsPage: Decodable {
   let accounts: [FireworksAccountPayload]
   let nextPageToken: String?
+
+  private enum CodingKeys: String, CodingKey {
+    case accounts
+    case nextPageToken
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    accounts =
+      try container.decodeIfPresent(
+        [FireworksAccountPayload].self,
+        forKey: .accounts
+      ) ?? []
+    nextPageToken = try container.decodeIfPresent(
+      String.self,
+      forKey: .nextPageToken
+    )
+  }
 }
 
 private struct FireworksAccountPayload: Decodable {
@@ -217,6 +235,29 @@ private struct FireworksCostPage: Decodable {
   let rows: [FireworksCostPayload]
   let nextPageToken: String?
   let subtotal: FireworksMoneyPayload
+
+  private enum CodingKeys: String, CodingKey {
+    case rows
+    case nextPageToken
+    case subtotal
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    rows =
+      try container.decodeIfPresent(
+        [FireworksCostPayload].self,
+        forKey: .rows
+      ) ?? []
+    nextPageToken = try container.decodeIfPresent(
+      String.self,
+      forKey: .nextPageToken
+    )
+    subtotal = try container.decode(
+      FireworksMoneyPayload.self,
+      forKey: .subtotal
+    )
+  }
 }
 
 private struct FireworksCostPayload: Decodable {
@@ -262,6 +303,20 @@ private struct FireworksMoneyPayload: Decodable {
   let currencyCode: String
   let units: String
   let nanos: Int
+
+  private enum CodingKeys: String, CodingKey {
+    case currencyCode
+    case units
+    case nanos
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    currencyCode =
+      try container.decodeIfPresent(String.self, forKey: .currencyCode) ?? ""
+    units = try container.decodeIfPresent(String.self, forKey: .units) ?? "0"
+    nanos = try container.decodeIfPresent(Int.self, forKey: .nanos) ?? 0
+  }
 
   func decimalAmount() throws -> Decimal {
     guard currencyCode == "USD" else {

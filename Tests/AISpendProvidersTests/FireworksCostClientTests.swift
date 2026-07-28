@@ -54,10 +54,11 @@ final class FireworksCostClientTests: XCTestCase {
       requests.requests[0].value(forHTTPHeaderField: "Accept"),
       "application/json"
     )
-    let body =
-      try JSONSerialization.jsonObject(
+    let body = try XCTUnwrap(
+      JSONSerialization.jsonObject(
         with: try XCTUnwrap(requests.requests[0].httpBody)
-      ) as! [String: Any]
+      ) as? [String: Any]
+    )
     XCTAssertEqual(
       Set(body.keys),
       Set(["startTime", "endTime", "scope", "groupBy", "pageSize"])
@@ -69,10 +70,11 @@ final class FireworksCostClientTests: XCTestCase {
     XCTAssertEqual(body["endTime"] as? String, "2026-07-01T00:00:00Z")
     XCTAssertNil(body["pageToken"])
 
-    let nextBody =
-      try JSONSerialization.jsonObject(
+    let nextBody = try XCTUnwrap(
+      JSONSerialization.jsonObject(
         with: try XCTUnwrap(requests.requests[1].httpBody)
-      ) as! [String: Any]
+      ) as? [String: Any]
+    )
     XCTAssertEqual(
       Set(nextBody.keys),
       Set(["startTime", "endTime", "scope", "groupBy", "pageSize", "pageToken"])
@@ -99,10 +101,11 @@ final class FireworksCostClientTests: XCTestCase {
       credential: Secret("fw_secret")
     )
 
-    let body =
-      try JSONSerialization.jsonObject(
+    let body = try XCTUnwrap(
+      JSONSerialization.jsonObject(
         with: try XCTUnwrap(requests.requests[0].httpBody)
-      ) as! [String: Any]
+      ) as? [String: Any]
+    )
     XCTAssertEqual(
       Set(body.keys),
       Set(["startTime", "endTime", "scope", "groupBy", "pageSize"])
@@ -166,6 +169,63 @@ final class FireworksCostClientTests: XCTestCase {
       ),
       expected: .unsupportedCurrency
     )
+  }
+
+  func testCostsRejectsMoneyWithOmittedCurrency() async {
+    let client = FireworksCostClient(http: { request in
+      (
+        Data(#"{"subtotal":{"units":"0","nanos":0}}"#.utf8),
+        response(for: request, status: 200)
+      )
+    })
+
+    await assertProviderThrows(
+      try await client.costs(
+        account: FireworksAccount(resourceName: "accounts/personal", id: "personal"),
+        window: juneWindow(),
+        scope: .account,
+        credential: Secret("fw_secret")
+      ),
+      expected: .unsupportedCurrency
+    )
+  }
+
+  func testCostsAcceptsOmittedRowsAndZeroMoneyScalars() async throws {
+    let client = FireworksCostClient(http: { request in
+      (
+        Data(#"{"subtotal":{"currencyCode":"USD"}}"#.utf8),
+        response(for: request, status: 200)
+      )
+    })
+
+    let result = try await client.costs(
+      account: FireworksAccount(resourceName: "accounts/personal", id: "personal"),
+      window: juneWindow(),
+      scope: .account,
+      credential: Secret("fw_secret")
+    )
+
+    XCTAssertTrue(result.rows.isEmpty)
+    XCTAssertEqual(result.subtotal, 0)
+  }
+
+  func testCostsAcceptsNanosOnlyUSDMoney() async throws {
+    let client = FireworksCostClient(http: { request in
+      (
+        Data(#"{"subtotal":{"currencyCode":"USD","nanos":250000000}}"#.utf8),
+        response(for: request, status: 200)
+      )
+    })
+
+    let result = try await client.costs(
+      account: FireworksAccount(resourceName: "accounts/personal", id: "personal"),
+      window: juneWindow(),
+      scope: .account,
+      credential: Secret("fw_secret")
+    )
+
+    XCTAssertTrue(result.rows.isEmpty)
+    XCTAssertEqual(result.subtotal, Decimal(string: "0.25"))
   }
 
   func testCostsRejectsNanosOutsideMoneyRange() async {
@@ -471,6 +531,16 @@ final class FireworksCostClientTests: XCTestCase {
       )?.queryItems
     )
     XCTAssertEqual(queryItems.first { $0.name == "pageSize" }?.value, "200")
+  }
+
+  func testAccountsAcceptsOmittedAccountsAndPageTokenOnEmptyPage() async throws {
+    let client = FireworksCostClient(http: { request in
+      (Data("{}".utf8), response(for: request, status: 200))
+    })
+
+    let accounts = try await client.accounts(credential: Secret("fw_secret"))
+
+    XCTAssertTrue(accounts.isEmpty)
   }
 
   func testAccountsRejectsRepeatedPageToken() async {

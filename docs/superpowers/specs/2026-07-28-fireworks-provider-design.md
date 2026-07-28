@@ -145,8 +145,11 @@ returns HTTP 401 or 403:
 The UI must not describe a successful `SELF` fallback as full account spend.
 Add a `ProviderFetchResult` coverage value with `complete` and `partial`
 states, defaulting to `complete` for existing adapters. The Fireworks adapter
-returns `partial` whenever at least one account is limited to personal scope
-or failed entirely. `RefreshCoordinator` keeps the returned records available
+returns `partial` whenever at least one refreshed account is limited to
+personal scope or another account failed. If every account fails, it returns
+failure-bearing complete-coverage semantics with refreshed-source authority so
+`RefreshCoordinator` records a failed refresh while retaining cached sources.
+For partial results, `RefreshCoordinator` keeps the returned records available
 but sets the combined summary's existing partial flag.
 
 ## Failure and Refresh Behavior
@@ -175,7 +178,7 @@ inventing a ledger record.
 
 ## Privacy and Diagnostics
 
-- The Fireworks key is read only from the process environment or the permitted
+- The Fireworks key is read-only from the process environment or the permitted
   Keychain item.
 - Raw account names, display names, email addresses, user IDs, and API-key IDs
   are neither stored nor displayed.
@@ -219,7 +222,7 @@ The README provider setup table will add Fireworks:
   `fireconnect login`.
 
 The provider limitations section will explain multi-account aggregation,
-account-to-self scope fallback, billing freshness, and the lack of Azure
+account-to-self-scope fallback, billing freshness, and the lack of Azure
 billing support.
 
 ## Testing

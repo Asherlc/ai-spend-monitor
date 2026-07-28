@@ -96,16 +96,10 @@ final class FireworksAdapterTests: XCTestCase {
       Dictionary(grouping: result.records, by: \.model).mapValues(\.count),
       ["models/kimi-k2": 2]
     )
-    let persistedRecords = try JSONEncoder().encode(result.records)
-    let output = [
-      String(decoding: persistedRecords, as: UTF8.self),
-      String(describing: result.attempts),
-      String(describing: result.coverage),
-      String(describing: result.refreshedSourceIDs),
-    ].joined(separator: "\n")
-    for rawValue in rawAccountIDs + rawResourceNames {
-      XCTAssertFalse(output.contains(rawValue), "Leaked raw Fireworks identity: \(rawValue)")
-    }
+    try assertNoFireworksIdentity(
+      in: result,
+      rawValues: rawAccountIDs + rawResourceNames
+    )
   }
 
   func testOrdinaryModelContainingAccountIDSubstringIsUnchanged() async throws {
@@ -323,6 +317,45 @@ final class FireworksAdapterTests: XCTestCase {
     XCTAssertTrue(message.contains("unavailable"))
   }
 
+  func testEveryAccountFailureReportsFailedRefreshWithoutAuthorizingCachePruning()
+    async throws
+  {
+    let adapter = FireworksAdapter(
+      credential: { Secret("fw_secret") },
+      accounts: { _ in
+        [
+          FireworksAccount(resourceName: "accounts/first", id: "first"),
+          FireworksAccount(resourceName: "accounts/second", id: "second"),
+        ]
+      },
+      costs: { _, _, _, _ in
+        throw ProviderClientError.httpStatus(500)
+      },
+      fingerprinter: AccountFingerprinter(key: Data(repeating: 9, count: 32)),
+      now: { juneDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertTrue(result.records.isEmpty)
+    XCTAssertTrue(result.refreshedSourceIDs.isEmpty)
+    XCTAssertEqual(result.coverage, .complete)
+    XCTAssertEqual(result.sourceAuthority, .refreshedSources)
+    let failureMessages = result.attempts.compactMap { attempt -> String? in
+      guard case .failed(let message) = attempt.outcome else {
+        return nil
+      }
+      return message
+    }
+    XCTAssertEqual(
+      failureMessages,
+      [
+        "Fireworks request failed (HTTP 500).",
+        "Fireworks request failed (HTTP 500).",
+      ]
+    )
+  }
+
   func testZeroCostSuccessRefreshesAccountSourceWithoutInventingRecord() async throws {
     let adapter = makeAdapter { _, _, _, _ in
       FireworksCostResult(rows: [], subtotal: 0)
@@ -376,6 +409,41 @@ final class FireworksAdapterTests: XCTestCase {
     XCTAssertEqual(Set(result.records.map(\.observationID)).count, 2)
   }
 
+  func testRowsCanonicalizingToSameIdentityAreSummedBeforeRecordCreation() async throws {
+    let rawModels = [
+      "accounts/private-owner/invalid/resource",
+      "accounts/private-project/models",
+    ]
+    let adapter = makeAdapter { _, window, _, _ in
+      FireworksCostResult(
+        rows: [
+          FireworksCostRow(
+            start: window.start,
+            end: window.start.addingTimeInterval(86_400),
+            model: rawModels[0],
+            amount: 1.25
+          ),
+          FireworksCostRow(
+            start: window.start,
+            end: window.start.addingTimeInterval(86_400),
+            model: rawModels[1],
+            amount: 2.75
+          ),
+        ],
+        subtotal: 4
+      )
+    }
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(result.records.count, 1)
+    XCTAssertEqual(result.records.first?.model, "unknown")
+    XCTAssertEqual(result.records.first?.amount, Money(4))
+    XCTAssertEqual(result.coverage, .complete)
+    XCTAssertEqual(result.attempts.last?.outcome, .succeeded(recordCount: 1))
+    try assertNoFireworksIdentity(in: result, rawValues: rawModels)
+  }
+
   func testRowsGreaterThanSubtotalFailOnlyThatAccount() async throws {
     let adapter = makeAdapter { _, _, _, _ in
       fireworksResult(amount: 5, subtotal: 2)
@@ -385,8 +453,8 @@ final class FireworksAdapterTests: XCTestCase {
 
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertTrue(result.refreshedSourceIDs.isEmpty)
-    XCTAssertEqual(
-      result.coverage, .partial(message: "Some Fireworks account spend is unavailable."))
+    XCTAssertEqual(result.coverage, .complete)
+    XCTAssertEqual(result.sourceAuthority, .refreshedSources)
     guard case .failed = result.attempts.last?.outcome else {
       return XCTFail("Expected failed cost attempt")
     }
