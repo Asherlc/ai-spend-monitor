@@ -1,1 +1,2 @@
-The bundled provider price catalog is added by a later task.
+model-prices.json contains the versioned USD rates used for local Claude Code
+and Codex estimates. Each entry records its authoritative provider source URL.

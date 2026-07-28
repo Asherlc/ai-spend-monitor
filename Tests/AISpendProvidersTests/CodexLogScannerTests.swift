@@ -12,8 +12,8 @@ final class CodexLogScannerTests: XCTestCase {
     let irrelevant = Data(repeating: 0x78, count: 262_144)
     let usage = Data(
       """
-      {"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}
-      {"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","event_id":"event-1","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":100}}}}
+      {"timestamp":"2026-06-12T10:44:59.123Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}
+      {"timestamp":"2026-06-12T10:45:00.456Z","type":"event_msg","event_id":"event-1","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":100}}}}
 
       """.utf8
     )

@@ -6,6 +6,7 @@ public struct CursorAdapter: ProviderAdapter {
 
   private let adminCredential: @Sendable () throws -> Secret?
   private let appSessionAvailable: @Sendable () throws -> Bool
+  private let csvUsage: (@Sendable (MonthWindow, Date) throws -> CursorCSVScanResult?)?
   private let browserDiscoveryEnabled: @Sendable () -> Bool
   private let usage: @Sendable (MonthWindow, Secret) async throws -> CursorUsageResult
   private let fingerprinter: AccountFingerprinter
@@ -16,6 +17,7 @@ public struct CursorAdapter: ProviderAdapter {
   init(
     adminCredential: @escaping @Sendable () throws -> Secret?,
     appSessionAvailable: @escaping @Sendable () throws -> Bool,
+    csvUsage: (@Sendable (MonthWindow, Date) throws -> CursorCSVScanResult?)? = nil,
     browserDiscoveryEnabled: @escaping @Sendable () -> Bool = { true },
     usage: @escaping @Sendable (MonthWindow, Secret) async throws -> CursorUsageResult,
     fingerprinter: AccountFingerprinter = .production,
@@ -25,6 +27,7 @@ public struct CursorAdapter: ProviderAdapter {
   ) {
     self.adminCredential = adminCredential
     self.appSessionAvailable = appSessionAvailable
+    self.csvUsage = csvUsage
     self.browserDiscoveryEnabled = browserDiscoveryEnabled
     self.usage = usage
     self.fingerprinter = fingerprinter
@@ -42,6 +45,7 @@ public struct CursorAdapter: ProviderAdapter {
     now: @escaping @Sendable () -> Date = Date.init
   ) {
     let client = CursorUsageClient(httpClient: httpClient)
+    let csvScanner = CursorCSVScanner(calendar: calendar)
     self.init(
       adminCredential: {
         try credentialHost.environmentSecret(named: "CURSOR_ADMIN_API_KEY")
@@ -49,6 +53,9 @@ public struct CursorAdapter: ProviderAdapter {
       appSessionAvailable: {
         let state = try stateReader.read()
         return state.accessToken != nil && state.teamID != nil
+      },
+      csvUsage: { window, fetchedAt in
+        try csvScanner.scan(window: window, fetchedAt: fetchedAt)
       },
       browserDiscoveryEnabled: { browserDiscovery.isEnabled },
       usage: { window, adminKey in
@@ -84,6 +91,7 @@ public struct CursorAdapter: ProviderAdapter {
     var records: [SpendRecord] = []
     var attempts: [SourceAttempt] = []
     var refreshedSourceIDs = Set<String>()
+    var hasActualSource = false
     do {
       if let adminKey = try adminCredential() {
         let result = try await usage(window, adminKey)
@@ -99,6 +107,7 @@ public struct CursorAdapter: ProviderAdapter {
         )
         records = normalized.records
         refreshedSourceIDs.insert("cursor-team-spend")
+        hasActualSource = true
         attempts.append(
           .init(
             strategyID: "cursor-admin-actual",
@@ -123,6 +132,39 @@ public struct CursorAdapter: ProviderAdapter {
           outcome: .failed(redactedMessage: message(for: error))
         )
       )
+    }
+
+    if !hasActualSource, let csvUsage {
+      do {
+        if let result = try csvUsage(window, fetchedAt) {
+          records = result.records
+          refreshedSourceIDs.insert(result.sourceID)
+          attempts.append(
+            .init(
+              strategyID: "cursor-dashboard-export",
+              outcome: .succeeded(recordCount: records.count)
+            )
+          )
+        } else {
+          attempts.append(
+            .init(
+              strategyID: "cursor-dashboard-export",
+              outcome: .unavailable(
+                reason: "No Cursor dashboard usage export in Downloads."
+              )
+            )
+          )
+        }
+      } catch is CancellationError {
+        throw CancellationError()
+      } catch {
+        attempts.append(
+          .init(
+            strategyID: "cursor-dashboard-export",
+            outcome: .failed(redactedMessage: message(for: error))
+          )
+        )
+      }
     }
 
     attempts.append(try appAttempt())

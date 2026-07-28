@@ -338,9 +338,15 @@ struct LogParseContext {
   let relativePath: String
   var lineNumber = 0
   private let timestampFormatter = ISO8601DateFormatter()
+  private let fractionalTimestampFormatter: ISO8601DateFormatter = {
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    return formatter
+  }()
 
   func parseTimestamp(_ value: String) -> Date? {
-    timestampFormatter.date(from: value)
+    fractionalTimestampFormatter.date(from: value)
+      ?? timestampFormatter.date(from: value)
   }
 }
 

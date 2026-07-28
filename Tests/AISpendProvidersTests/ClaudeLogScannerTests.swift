@@ -12,7 +12,7 @@ final class ClaudeLogScannerTests: XCTestCase {
     let irrelevant = Data(repeating: 0x78, count: 262_144)
     let usage = Data(
       """
-      {"type":"assistant","timestamp":"2026-06-12T10:45:00Z","requestId":"request-1","message":{"id":"message-1","model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
+      {"type":"assistant","timestamp":"2026-06-12T10:45:00.123Z","requestId":"request-1","message":{"id":"message-1","model":"claude-sonnet-4-5","usage":{"input_tokens":1000,"output_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}
 
       """.utf8
     )
