@@ -26,6 +26,7 @@ AI Spend requires macOS 14 Sonoma or later and currently displays USD only.
 - Provider and model-level breakdowns
 - Clear labels for provider-reported actuals and local-log estimates
 - Month-end projections based on spend so far
+- Budget exhaustion forecasts based on the current burn rate
 - Multiple independent monthly budgets
 - Native notifications when projected spend moves off pace
 - Provider-specific freshness and diagnostics
@@ -120,6 +121,10 @@ app shows **Collecting pace** rather than extrapolating from too little data.
 Open **Settings → Budgets** to add any number of distinct positive monthly
 budgets, such as `$500` and `$1,500`. Every enabled budget is evaluated
 independently against the same combined month-end projection.
+
+Each budget also uses the current month-to-date burn rate to show when it is
+projected to be reached. If the budget is not expected to run out before the
+next calendar month, the app reports that it lasts through the month.
 
 When a budget changes from on pace to off pace, AI Spend sends an immediate
 notification. While it remains off pace, the app sends at most one reminder per

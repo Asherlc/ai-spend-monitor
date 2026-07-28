@@ -1,10 +1,17 @@
 import Foundation
 
+public enum BudgetExhaustionForecast: Hashable, Sendable {
+  case reached
+  case projected(Date)
+  case lastsThroughMonth
+}
+
 public struct BudgetEvaluation: Identifiable, Hashable, Sendable {
   public let id: UUID
   public let limit: Money
   public let state: BudgetPacingState
   public let projectedMargin: Money?
+  public let exhaustionForecast: BudgetExhaustionForecast?
 }
 
 public struct PacingResult: Hashable, Sendable {
@@ -41,7 +48,8 @@ public struct PacingEngine: Sendable {
             id: $0.id,
             limit: $0.limit,
             state: .unknown,
-            projectedMargin: nil
+            projectedMargin: nil,
+            exhaustionForecast: nil
           )
         }
       )
@@ -60,7 +68,8 @@ public struct PacingEngine: Sendable {
             id: $0.id,
             limit: $0.limit,
             state: .collecting,
-            projectedMargin: nil
+            projectedMargin: nil,
+            exhaustionForecast: nil
           )
         }
       )
@@ -76,9 +85,40 @@ public struct PacingEngine: Sendable {
           id: budget.id,
           limit: budget.limit,
           state: projection <= budget.limit ? .onPace : .offPace,
-          projectedMargin: budget.limit - projection
+          projectedMargin: budget.limit - projection,
+          exhaustionForecast: exhaustionForecast(
+            spend: spend,
+            budget: budget,
+            now: now,
+            elapsed: elapsed,
+            monthEnd: window.end
+          )
         )
       }
     )
+  }
+
+  private func exhaustionForecast(
+    spend: Money,
+    budget: BudgetDefinition,
+    now: Date,
+    elapsed: TimeInterval,
+    monthEnd: Date
+  ) -> BudgetExhaustionForecast {
+    guard spend < budget.limit else {
+      return .reached
+    }
+    guard spend.amount > 0 else {
+      return .lastsThroughMonth
+    }
+
+    let remaining = budget.limit - spend
+    let remainingDuration = NSDecimalNumber(
+      decimal: remaining.amount * Decimal(elapsed) / spend.amount
+    ).doubleValue
+    let projectedDate = now.addingTimeInterval(remainingDuration)
+    return projectedDate < monthEnd
+      ? .projected(projectedDate)
+      : .lastsThroughMonth
   }
 }

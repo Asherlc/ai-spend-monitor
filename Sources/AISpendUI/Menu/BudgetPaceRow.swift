@@ -31,7 +31,10 @@ public struct BudgetPaceRow: View {
   }
 
   private var stateLabel: String {
-    switch evaluation.state {
+    if let forecast = evaluation.exhaustionForecast {
+      return SpendFormatting.budgetForecast(forecast)
+    }
+    return switch evaluation.state {
     case .collecting: "Collecting pace"
     case .onPace: "On pace"
     case .offPace: "Off pace"

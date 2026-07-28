@@ -378,7 +378,8 @@ final class BudgetAlertEngineTests: XCTestCase {
       id: budget.id,
       limit: budget.limit,
       state: state,
-      projectedMargin: nil
+      projectedMargin: nil,
+      exhaustionForecast: nil
     )
   }
 

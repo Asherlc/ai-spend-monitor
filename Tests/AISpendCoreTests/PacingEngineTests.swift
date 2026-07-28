@@ -3,6 +3,159 @@ import XCTest
 @testable import AISpendCore
 
 final class PacingEngineTests: XCTestCase {
+  func testProjectsWhenBudgetWillBeReachedBeforeMonthEnd() throws {
+    let start = Date(timeIntervalSince1970: 0)
+    let result = PacingEngine().evaluate(
+      spend: Money(400),
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(500),
+          isEnabled: true,
+          createdAt: start
+        )
+      ],
+      now: start.addingTimeInterval(180_000),
+      window: MonthWindow(
+        start: start,
+        end: start.addingTimeInterval(360_000)
+      ),
+      hasAnyData: true,
+      allDataIsStale: false
+    )
+
+    XCTAssertEqual(
+      result.budgets.first?.exhaustionForecast,
+      .projected(start.addingTimeInterval(225_000))
+    )
+  }
+
+  func testTreatsExhaustionAtMonthEndAsLastingThroughMonth() {
+    let start = Date(timeIntervalSince1970: 0)
+    let result = PacingEngine().evaluate(
+      spend: Money(400),
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(800),
+          isEnabled: true,
+          createdAt: start
+        )
+      ],
+      now: start.addingTimeInterval(180_000),
+      window: MonthWindow(
+        start: start,
+        end: start.addingTimeInterval(360_000)
+      ),
+      hasAnyData: true,
+      allDataIsStale: false
+    )
+
+    XCTAssertEqual(
+      result.budgets.first?.exhaustionForecast,
+      .lastsThroughMonth
+    )
+  }
+
+  func testReportsBudgetAlreadyReached() {
+    let start = Date(timeIntervalSince1970: 0)
+    let result = PacingEngine().evaluate(
+      spend: Money(500),
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(500),
+          isEnabled: true,
+          createdAt: start
+        )
+      ],
+      now: start.addingTimeInterval(180_000),
+      window: MonthWindow(
+        start: start,
+        end: start.addingTimeInterval(360_000)
+      ),
+      hasAnyData: true,
+      allDataIsStale: false
+    )
+
+    XCTAssertEqual(result.budgets.first?.exhaustionForecast, .reached)
+  }
+
+  func testZeroSpendLastsThroughMonth() {
+    let start = Date(timeIntervalSince1970: 0)
+    let result = PacingEngine().evaluate(
+      spend: .zero,
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(500),
+          isEnabled: true,
+          createdAt: start
+        )
+      ],
+      now: start.addingTimeInterval(180_000),
+      window: MonthWindow(
+        start: start,
+        end: start.addingTimeInterval(360_000)
+      ),
+      hasAnyData: true,
+      allDataIsStale: false
+    )
+
+    XCTAssertEqual(
+      result.budgets.first?.exhaustionForecast,
+      .lastsThroughMonth
+    )
+  }
+
+  func testOmitsExhaustionForecastWhileCollecting() {
+    let start = Date(timeIntervalSince1970: 0)
+    let result = PacingEngine().evaluate(
+      spend: Money(5),
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(500),
+          isEnabled: true,
+          createdAt: start
+        )
+      ],
+      now: start.addingTimeInterval(60),
+      window: MonthWindow(
+        start: start,
+        end: start.addingTimeInterval(2_592_000)
+      ),
+      hasAnyData: true,
+      allDataIsStale: false
+    )
+
+    XCTAssertNil(result.budgets.first?.exhaustionForecast)
+  }
+
+  func testOmitsExhaustionForecastWithoutData() {
+    let start = Date(timeIntervalSince1970: 0)
+    let result = PacingEngine().evaluate(
+      spend: .zero,
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(500),
+          isEnabled: true,
+          createdAt: start
+        )
+      ],
+      now: start.addingTimeInterval(86_400),
+      window: MonthWindow(
+        start: start,
+        end: start.addingTimeInterval(2_592_000)
+      ),
+      hasAnyData: false,
+      allDataIsStale: false
+    )
+
+    XCTAssertNil(result.budgets.first?.exhaustionForecast)
+  }
+
   func testEvaluatesMultipleBudgetsIndependently() throws {
     let start = Date(timeIntervalSince1970: 0)
     let window = MonthWindow(start: start, end: start.addingTimeInterval(360_000))
@@ -16,6 +169,13 @@ final class PacingEngineTests: XCTestCase {
       hasAnyData: true, allDataIsStale: false)
     XCTAssertEqual(result.projection, Money(800))
     XCTAssertEqual(result.budgets.map(\.state), [.offPace, .onPace])
+    XCTAssertEqual(
+      result.budgets.map(\.exhaustionForecast),
+      [
+        .projected(start.addingTimeInterval(225_000)),
+        .lastsThroughMonth,
+      ]
+    )
   }
 
   func testCollectsForFirstSixHours() {

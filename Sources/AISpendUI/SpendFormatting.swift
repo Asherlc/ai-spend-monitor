@@ -43,4 +43,24 @@ public enum SpendFormatting {
     formatter.unitsStyle = .short
     return formatter.localizedString(for: date, relativeTo: now)
   }
+
+  public static func budgetForecast(
+    _ forecast: BudgetExhaustionForecast,
+    calendar: Calendar = .current,
+    locale: Locale = .current
+  ) -> String {
+    switch forecast {
+    case .reached:
+      return "Budget reached"
+    case .lastsThroughMonth:
+      return "Lasts through month"
+    case .projected(let date):
+      let formatter = DateFormatter()
+      formatter.calendar = calendar
+      formatter.timeZone = calendar.timeZone
+      formatter.locale = locale
+      formatter.setLocalizedDateFormatFromTemplate("MMM d")
+      return "Projected to reach \(formatter.string(from: date))"
+    }
+  }
 }
