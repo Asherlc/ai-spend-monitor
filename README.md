@@ -26,11 +26,14 @@ This is a monitoring aid, not an invoice or accounting export.
 The shipped adapters attempt these sources:
 
 1. **Cursor:** `CURSOR_ADMIN_API_KEY` supplies actual team spend and model
-   attribution through Cursor's documented Admin API. An existing Cursor app
-   session can be detected for diagnostics, but session-based billing retrieval
-   is explicitly unsupported because Cursor exposes no documented app-session
-   billing endpoint. Cursor has no local-log estimate fallback. Only usage-based
-   team spend is included.
+   attribution through Cursor's documented Admin API. When that key is absent,
+   the latest `team-usage-events-*.csv` dashboard export in `~/Downloads` is
+   used as an actual, model-attributed fallback. Re-export month-to-date usage
+   from Cursor to update it; CSV event costs are provider-reported but rounded
+   per row. An existing Cursor app session can be detected for diagnostics, but
+   session-based billing retrieval is explicitly unsupported because Cursor
+   exposes no documented app-session billing endpoint. Cursor has no local-log
+   estimate fallback. Only usage-based team spend is included.
 2. **Claude:** `ANTHROPIC_ADMIN_KEY`, or `ANTHROPIC_OAUTH_TOKEN` when the admin
    key is absent, supplies actual organization cost reports. Supported local
    Claude Code session logs are then scanned for uncovered estimates. No Claude
@@ -74,8 +77,9 @@ Spend records, budgets, alert state, and refresh metadata stay in the app's
 local Application Support directory. AI Spend has no analytics or telemetry.
 It does not ask you to paste credentials and does not copy credentials, browser
 cookies, or tokens into its ledger. Credential and browser discovery is limited
-to known provider locations, and network access is restricted to provider
-domains. Browser-session discovery can also be disabled globally.
+to known provider locations, the Cursor export fallback reads only matching CSV
+files in `~/Downloads`, and network access is restricted to provider domains.
+Browser-session discovery can also be disabled globally.
 
 Diagnostics show source strategy outcomes and sanitized failure descriptions.
 Authorization headers, cookies, keys, query secrets, emails, and account

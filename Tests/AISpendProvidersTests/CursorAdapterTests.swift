@@ -136,6 +136,57 @@ final class CursorAdapterTests: XCTestCase {
       ])
   }
 
+  func testAdapterFallsBackToDashboardCSVWhenAdminCredentialIsUnavailable() async throws {
+    let observationID = "cursor-export-record"
+    let record = try SpendRecord(
+      id: observationID,
+      provider: .cursor,
+      accountFingerprint: "cursor-team",
+      model: "GPT-5.6 Sol",
+      intervalStart: julyWindow().start,
+      intervalEnd: julyWindow().end,
+      amount: Money(Decimal(string: "359.45")!),
+      quality: .actual,
+      sourceID: "cursor-dashboard-export",
+      observationID: observationID,
+      fetchedAt: julyDate(),
+      estimate: nil
+    )
+    let adapter = CursorAdapter(
+      adminCredential: { nil },
+      appSessionAvailable: { true },
+      csvUsage: { _, _ in
+        CursorCSVScanResult(
+          records: [record],
+          sourceID: "cursor-dashboard-export"
+        )
+      },
+      usage: { _, _ in
+        XCTFail("Admin usage must not run")
+        return CursorUsageResult(authoritativeCents: 0, modelCents: [:])
+      },
+      calendar: utcCalendar(),
+      now: { julyDate() }
+    )
+
+    let result = try await adapter.fetch(window: julyWindow())
+
+    XCTAssertEqual(result.records, [record])
+    XCTAssertEqual(result.refreshedSourceIDs, ["cursor-dashboard-export"])
+    XCTAssertEqual(
+      result.attempts.map(\.strategyID),
+      [
+        "cursor-admin-actual",
+        "cursor-dashboard-export",
+        "cursor-app-session",
+      ]
+    )
+    XCTAssertEqual(
+      result.attempts[1].outcome,
+      .succeeded(recordCount: 1)
+    )
+  }
+
   func testAdapterTreatsMissingCursorStateAsUnavailable() async throws {
     let adapter = CursorAdapter(
       adminCredential: { nil },
