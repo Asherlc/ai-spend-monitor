@@ -141,6 +141,7 @@ public struct FireworksAdapter: ProviderAdapter {
           identity: resolvedCredential,
           namespace: "fireworks-account:\(account.resourceName)"
         )
+        try Task.checkCancellation()
         let sourceID = "fireworks-usage-costs:\(fingerprint)"
         let scope: FireworksCostScope
         let result: FireworksCostResult

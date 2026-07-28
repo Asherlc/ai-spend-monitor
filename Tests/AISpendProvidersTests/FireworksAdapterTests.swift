@@ -501,6 +501,28 @@ final class FireworksAdapterTests: XCTestCase {
     await assertCancellation(from: adapter, seam: "fingerprint")
   }
 
+  func testCancellationMarkedBySuccessfulFingerprintStopsBeforeCostQuery() async {
+    let costInvocations = LockedInt()
+    let adapter = FireworksAdapter(
+      credential: { Secret("fw_secret") },
+      accounts: { _ in
+        [FireworksAccount(resourceName: "accounts/personal", id: "personal")]
+      },
+      costs: { _, _, _, _ in
+        costInvocations.increment()
+        return fireworksResult(amount: 1)
+      },
+      fingerprinter: AccountFingerprinter { _, _ in
+        withUnsafeCurrentTask { $0?.cancel() }
+        return "fingerprint"
+      },
+      now: { juneDate() }
+    )
+
+    await assertCancellation(from: adapter, seam: "successful fingerprint")
+    XCTAssertEqual(costInvocations.value, 0)
+  }
+
   private func assertCancellation(
     from adapter: FireworksAdapter,
     seam: String
