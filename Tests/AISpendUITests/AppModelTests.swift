@@ -152,9 +152,11 @@ final class AppModelTests: XCTestCase {
     )
     let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
 
-    guard case .partial(_, let message) = try XCTUnwrap(
-      model.providerRows.first
-    ).status.freshness else {
+    guard
+      case .partial(_, let message) = try XCTUnwrap(
+        model.providerRows.first
+      ).status.freshness
+    else {
       return XCTFail("Expected limited provider freshness")
     }
     XCTAssertEqual(message, "Only authenticated-user spend is available.")
