@@ -86,7 +86,9 @@ public struct SpendReconciler: Sendable {
       return false
     }
     return actuals.contains {
-      $0.model == identity.canonicalModel && intersects(estimate, $0)
+      $0.model == identity.canonicalModel
+        && $0.fetchedAt == estimate.fetchedAt
+        && intersects(estimate, $0)
     }
   }
 

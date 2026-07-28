@@ -195,6 +195,7 @@ final class LedgerRepositoryTests: XCTestCase {
         records: [replacementActual, replacementLocal],
         provider: .claude,
         refreshedSourceIDs: ["anthropic.cost", "claude.local"],
+        sourceAuthority: .refreshedSources,
         interval: month,
         state: replacementState
       )

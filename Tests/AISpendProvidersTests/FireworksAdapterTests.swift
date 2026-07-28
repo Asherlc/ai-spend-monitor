@@ -47,6 +47,28 @@ final class FireworksAdapterTests: XCTestCase {
     XCTAssertFalse(privateIdentifiers.contains { $0 == "work" || $0.hasSuffix(":work") })
   }
 
+  func testAccountFingerprintAndSourceIDRemainStableAcrossCredentialRotation() async throws {
+    func fetch(credential: String) async throws -> SpendRecord {
+      let adapter = FireworksAdapter(
+        credential: { Secret(credential) },
+        accounts: { _ in
+          [FireworksAccount(resourceName: "accounts/stable-account", id: "stable-account")]
+        },
+        costs: { _, _, _, _ in fireworksResult(amount: 1) },
+        fingerprinter: AccountFingerprinter(key: Data(repeating: 7, count: 32)),
+        now: { juneDate() }
+      )
+      let result = try await adapter.fetch(window: juneWindow())
+      return try XCTUnwrap(result.records.first)
+    }
+
+    let beforeRotation = try await fetch(credential: "fw_old_secret")
+    let afterRotation = try await fetch(credential: "fw_new_secret")
+
+    XCTAssertEqual(beforeRotation.accountFingerprint, afterRotation.accountFingerprint)
+    XCTAssertEqual(beforeRotation.sourceID, afterRotation.sourceID)
+  }
+
   func testResourceQualifiedModelsRemoveAccountIdentityAndStillAggregateByModel() async throws {
     let rawAccountIDs = ["tenant-alpha-secret", "tenant-beta-secret"]
     let rawResourceNames = rawAccountIDs.map { "accounts/\($0)" }
@@ -297,6 +319,7 @@ final class FireworksAdapterTests: XCTestCase {
     guard case .partial(let message) = result.coverage else {
       return XCTFail("Expected partial coverage")
     }
+    XCTAssertEqual(result.sourceAuthority, .refreshedSources)
     XCTAssertTrue(message.contains("unavailable"))
   }
 
@@ -310,6 +333,7 @@ final class FireworksAdapterTests: XCTestCase {
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertEqual(result.refreshedSourceIDs.count, 1)
     XCTAssertEqual(result.coverage, .complete)
+    XCTAssertEqual(result.sourceAuthority, .allProviderSources)
     XCTAssertEqual(result.attempts.last?.outcome, .succeeded(recordCount: 0))
   }
 

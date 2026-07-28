@@ -107,7 +107,11 @@ public struct FireworksAdapter: ProviderAdapter {
             outcome: .unavailable(reason: "No accessible Fireworks accounts.")
           )
         )
-        return emptyResult(attempts: attempts, fetchedAt: fetchedAt)
+        return emptyResult(
+          attempts: attempts,
+          fetchedAt: fetchedAt,
+          sourceAuthority: .allProviderSources
+        )
       }
       attempts.append(
         SourceAttempt(
@@ -139,8 +143,8 @@ public struct FireworksAdapter: ProviderAdapter {
       try Task.checkCancellation()
       do {
         let fingerprint = try fingerprinter.fingerprint(
-          identity: resolvedCredential,
-          namespace: "fireworks-account:\(account.resourceName)"
+          identity: Secret(account.resourceName),
+          namespace: "fireworks-account"
         )
         try Task.checkCancellation()
         let sourceID = "fireworks-usage-costs:\(fingerprint)"
@@ -274,7 +278,10 @@ public struct FireworksAdapter: ProviderAdapter {
       attempts: attempts,
       refreshedSourceIDs: refreshedSourceIDs,
       fetchedAt: fetchedAt,
-      coverage: coverage
+      coverage: coverage,
+      sourceAuthority: coverage == .complete
+        ? .allProviderSources
+        : .refreshedSources
     )
   }
 
@@ -363,14 +370,16 @@ public struct FireworksAdapter: ProviderAdapter {
 
   private func emptyResult(
     attempts: [SourceAttempt],
-    fetchedAt: Date
+    fetchedAt: Date,
+    sourceAuthority: ProviderSourceAuthority = .refreshedSources
   ) -> ProviderFetchResult {
     ProviderFetchResult(
       provider: provider,
       records: [],
       attempts: attempts,
       refreshedSourceIDs: [],
-      fetchedAt: fetchedAt
+      fetchedAt: fetchedAt,
+      sourceAuthority: sourceAuthority
     )
   }
 

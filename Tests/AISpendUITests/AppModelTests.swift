@@ -85,6 +85,70 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.dailySpend(for: .claude).map(\.amount), [Money(10)])
   }
 
+  func testClaudeDailySpendExcludesRoutedEstimateCoveredByFireworksActual() throws {
+    let start = Date(timeIntervalSince1970: 1_728_000)
+    let generation = start.addingTimeInterval(3_600)
+    let estimate = try spendRecord(
+      id: "claude-estimate",
+      provider: .claude,
+      model: "accounts/fireworks/models/kimi-k2",
+      start: start,
+      amount: 8,
+      quality: .estimated,
+      source: "claude-logs",
+      fetchedAt: generation
+    )
+    let actual = try spendRecord(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "models/kimi-k2",
+      start: start,
+      amount: 10,
+      quality: .actual,
+      source: "fireworks-costs",
+      fetchedAt: generation
+    )
+    let model = AppModel(
+      snapshot: Self.updatedSnapshot,
+      refresh: { _ in Self.updatedSnapshot },
+      records: { [estimate, actual] }
+    )
+
+    XCTAssertTrue(model.dailySpend(for: .claude).isEmpty)
+  }
+
+  func testClaudeDailySpendKeepsOrdinaryEstimateAlongsideFireworksActual() throws {
+    let start = Date(timeIntervalSince1970: 1_728_000)
+    let generation = start.addingTimeInterval(3_600)
+    let estimate = try spendRecord(
+      id: "claude-estimate",
+      provider: .claude,
+      model: "claude-sonnet",
+      start: start,
+      amount: 8,
+      quality: .estimated,
+      source: "claude-logs",
+      fetchedAt: generation
+    )
+    let actual = try spendRecord(
+      id: "fireworks-actual",
+      provider: .fireworks,
+      model: "claude-sonnet",
+      start: start,
+      amount: 10,
+      quality: .actual,
+      source: "fireworks-costs",
+      fetchedAt: generation
+    )
+    let model = AppModel(
+      snapshot: Self.updatedSnapshot,
+      refresh: { _ in Self.updatedSnapshot },
+      records: { [estimate, actual] }
+    )
+
+    XCTAssertEqual(model.dailySpend(for: .claude).map(\.amount), [Money(8)])
+  }
+
   func testNoDataSnapshotUsesUnavailableLabelsInsteadOfZeroDollars() {
     let noData = Self.snapshot(
       total: 0,
@@ -608,23 +672,26 @@ final class AppModelTests: XCTestCase {
 
   private func spendRecord(
     id: String,
+    provider: ProviderID = .claude,
+    model: String = "claude-sonnet",
     start: Date,
     amount: Decimal,
     quality: SpendQuality,
-    source: String
+    source: String,
+    fetchedAt: Date? = nil
   ) throws -> SpendRecord {
     try SpendRecord(
       id: id,
-      provider: .claude,
+      provider: provider,
       accountFingerprint: "account",
-      model: "claude-sonnet",
+      model: model,
       intervalStart: start,
       intervalEnd: start.addingTimeInterval(3_600),
       amount: Money(amount),
       quality: quality,
       sourceID: source,
       observationID: id,
-      fetchedAt: start,
+      fetchedAt: fetchedAt ?? start,
       estimate: nil
     )
   }

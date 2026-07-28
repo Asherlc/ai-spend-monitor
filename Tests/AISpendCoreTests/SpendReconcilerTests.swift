@@ -121,6 +121,62 @@ final class SpendReconcilerTests: XCTestCase {
     XCTAssertEqual(result.excludedEstimatedAmount, Money(12))
   }
 
+  func testClaudeFireworksEstimateRemainsWhenActualIsFromOlderRefreshGeneration() throws {
+    let start = Date(timeIntervalSince1970: 1_704_067_200)
+    let end = start.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "cached-fireworks-actual",
+      provider: .fireworks,
+      accountFingerprint: "fireworks-account",
+      model: "models/kimi-k2",
+      start: start,
+      end: end,
+      amount: 10,
+      quality: .actual,
+      fetchedAt: start
+    )
+    let estimate = try record(
+      id: "fresh-claude-estimate",
+      model: "accounts/fireworks/models/kimi-k2",
+      start: start,
+      end: end,
+      amount: 12,
+      quality: .estimated,
+      fetchedAt: end
+    )
+
+    let result = SpendReconciler().reconcile([estimate, actual])
+
+    XCTAssertEqual(Set(result.included.map(\.id)), [actual.id, estimate.id])
+    XCTAssertEqual(result.excludedEstimatedAmount, .zero)
+  }
+
+  func testSameProviderReconciliationIgnoresRefreshGeneration() throws {
+    let start = Date(timeIntervalSince1970: 1_704_067_200)
+    let end = start.addingTimeInterval(86_400)
+    let actual = try record(
+      id: "cached-actual",
+      start: start,
+      end: end,
+      amount: 10,
+      quality: .actual,
+      fetchedAt: start
+    )
+    let estimate = try record(
+      id: "fresh-estimate",
+      start: start,
+      end: end,
+      amount: 12,
+      quality: .estimated,
+      fetchedAt: end
+    )
+
+    let result = SpendReconciler().reconcile([estimate, actual])
+
+    XCTAssertEqual(result.included.map(\.id), [actual.id])
+    XCTAssertEqual(result.excludedRecordIDs, [estimate.id])
+  }
+
   func testClaudeFireworksRouterEstimateIsExcludedByMatchingActual() throws {
     let start = Date(timeIntervalSince1970: 1_704_067_200)
     let end = start.addingTimeInterval(86_400)
@@ -375,7 +431,8 @@ final class SpendReconcilerTests: XCTestCase {
     end: Date,
     amount: Decimal,
     quality: SpendQuality,
-    observationID: String? = nil
+    observationID: String? = nil,
+    fetchedAt: Date? = nil
   ) throws -> SpendRecord {
     try SpendRecord(
       id: id,
@@ -388,7 +445,7 @@ final class SpendReconcilerTests: XCTestCase {
       quality: quality,
       sourceID: "source-\(id)",
       observationID: observationID ?? "observation-\(id)",
-      fetchedAt: end,
+      fetchedAt: fetchedAt ?? end,
       estimate: nil
     )
   }

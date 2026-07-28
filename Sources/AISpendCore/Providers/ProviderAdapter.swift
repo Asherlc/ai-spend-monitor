@@ -5,6 +5,11 @@ public enum ProviderDataCoverage: Hashable, Sendable {
   case partial(message: String)
 }
 
+public enum ProviderSourceAuthority: Hashable, Sendable {
+  case refreshedSources
+  case allProviderSources
+}
+
 public struct SourceAttempt: Hashable, Sendable {
   public let strategyID: String
   public let outcome: Outcome
@@ -28,6 +33,7 @@ public struct ProviderFetchResult: Sendable {
   public let refreshedSourceIDs: Set<String>
   public let fetchedAt: Date
   public let coverage: ProviderDataCoverage
+  public let sourceAuthority: ProviderSourceAuthority
 
   public init(
     provider: ProviderID,
@@ -35,7 +41,8 @@ public struct ProviderFetchResult: Sendable {
     attempts: [SourceAttempt],
     refreshedSourceIDs: Set<String>,
     fetchedAt: Date,
-    coverage: ProviderDataCoverage = .complete
+    coverage: ProviderDataCoverage = .complete,
+    sourceAuthority: ProviderSourceAuthority = .refreshedSources
   ) {
     self.provider = provider
     self.records = records
@@ -43,6 +50,7 @@ public struct ProviderFetchResult: Sendable {
     self.refreshedSourceIDs = refreshedSourceIDs
     self.fetchedAt = fetchedAt
     self.coverage = coverage
+    self.sourceAuthority = sourceAuthority
   }
 }
 

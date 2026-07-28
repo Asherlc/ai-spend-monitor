@@ -287,7 +287,12 @@ public final class RefreshCoordinator {
             refreshStatus: refreshStatus,
             lastFailureMessage: coverageMessage
           )
-          try persist(result: result, state: state, in: activeWindow)
+          try persist(
+            result: result,
+            state: state,
+            in: activeWindow,
+            refreshGeneration: activeNow
+          )
           states[provider] = state
           attempts[provider] = sanitizedAttempts
         } catch {
@@ -463,7 +468,8 @@ public final class RefreshCoordinator {
   private func persist(
     result: ProviderFetchResult,
     state: StoredProviderState,
-    in window: MonthWindow
+    in window: MonthWindow,
+    refreshGeneration: Date
   ) throws {
     guard result.records.allSatisfy({ $0.provider == result.provider }) else {
       throw RefreshCoordinatorError.providerMismatch
@@ -472,10 +478,27 @@ public final class RefreshCoordinator {
     guard recordSourceIDs.isSubset(of: result.refreshedSourceIDs) else {
       throw RefreshCoordinatorError.unrefreshedRecordSource
     }
+    let records = try result.records.map {
+      try SpendRecord(
+        id: $0.id,
+        provider: $0.provider,
+        accountFingerprint: $0.accountFingerprint,
+        model: $0.model,
+        intervalStart: $0.intervalStart,
+        intervalEnd: $0.intervalEnd,
+        amount: $0.amount,
+        quality: $0.quality,
+        sourceID: $0.sourceID,
+        observationID: $0.observationID,
+        fetchedAt: refreshGeneration,
+        estimate: $0.estimate
+      )
+    }
     try repository.applyProviderRefresh(
-      records: result.records,
+      records: records,
       provider: result.provider,
       refreshedSourceIDs: result.refreshedSourceIDs,
+      sourceAuthority: result.sourceAuthority,
       interval: window,
       state: state
     )

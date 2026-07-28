@@ -228,7 +228,16 @@ private struct FireworksCostPayload: Decodable {
     guard let decodedStart = formatter.date(from: dimensions.startTime) else {
       throw ProviderClientError.invalidResponse
     }
-    let dayEnd = decodedStart.addingTimeInterval(24 * 60 * 60)
+    var utcCalendar = Calendar(identifier: .gregorian)
+    utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    guard let nextUTCMidnight = utcCalendar.dateInterval(of: .day, for: decodedStart)?.end
+    else {
+      throw ProviderClientError.invalidResponse
+    }
+    let dayEnd =
+      decodedStart < window.start
+      ? decodedStart.addingTimeInterval(24 * 60 * 60)
+      : nextUTCMidnight
     let start = max(decodedStart, window.start)
     let end = min(dayEnd, window.end)
     guard start < end else {

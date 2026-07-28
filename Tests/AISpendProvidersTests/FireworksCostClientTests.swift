@@ -312,6 +312,95 @@ final class FireworksCostClientTests: XCTestCase {
     XCTAssertEqual(result.rows[1].end, juneWindow().end)
   }
 
+  func testCostsEndsRangeIntersectedDayAtNextUTCMidnight() async throws {
+    let window = MonthWindow(
+      start: try XCTUnwrap(
+        ISO8601DateFormatter().date(from: "2026-06-01T07:00:00Z")
+      ),
+      end: try XCTUnwrap(
+        ISO8601DateFormatter().date(from: "2026-07-01T07:00:00Z")
+      )
+    )
+    let client = FireworksCostClient(http: { request in
+      (
+        Data(
+          #"{"rows":[{"dimensions":{"startTime":"2026-06-01T07:00:00Z","model":"first"},"subtotal":{"currencyCode":"USD","units":"1","nanos":0}}],"subtotal":{"currencyCode":"USD","units":"1","nanos":0}}"#
+            .utf8
+        ),
+        response(for: request, status: 200)
+      )
+    })
+
+    let result = try await client.costs(
+      account: FireworksAccount(resourceName: "accounts/personal", id: "personal"),
+      window: window,
+      scope: .account,
+      credential: Secret("fw_secret")
+    )
+
+    XCTAssertEqual(
+      result.rows.first?.end,
+      ISO8601DateFormatter().date(from: "2026-06-02T00:00:00Z")
+    )
+  }
+
+  func testCostsEndsMidnightDayAtFollowingUTCMidnight() async throws {
+    let client = FireworksCostClient(http: { request in
+      (
+        Data(
+          #"{"rows":[{"dimensions":{"startTime":"2026-06-02T00:00:00Z","model":"normal"},"subtotal":{"currencyCode":"USD","units":"1","nanos":0}}],"subtotal":{"currencyCode":"USD","units":"1","nanos":0}}"#
+            .utf8
+        ),
+        response(for: request, status: 200)
+      )
+    })
+
+    let result = try await client.costs(
+      account: FireworksAccount(resourceName: "accounts/personal", id: "personal"),
+      window: juneWindow(),
+      scope: .account,
+      credential: Secret("fw_secret")
+    )
+
+    XCTAssertEqual(
+      result.rows.first?.end,
+      ISO8601DateFormatter().date(from: "2026-06-03T00:00:00Z")
+    )
+  }
+
+  func testCostsClampsFinalDayToQueryEnd() async throws {
+    let window = MonthWindow(
+      start: try XCTUnwrap(
+        ISO8601DateFormatter().date(from: "2026-06-01T07:00:00Z")
+      ),
+      end: try XCTUnwrap(
+        ISO8601DateFormatter().date(from: "2026-07-01T07:00:00Z")
+      )
+    )
+    let client = FireworksCostClient(http: { request in
+      (
+        Data(
+          #"{"rows":[{"dimensions":{"startTime":"2026-07-01T00:00:00Z","model":"last"},"subtotal":{"currencyCode":"USD","units":"1","nanos":0}}],"subtotal":{"currencyCode":"USD","units":"1","nanos":0}}"#
+            .utf8
+        ),
+        response(for: request, status: 200)
+      )
+    })
+
+    let result = try await client.costs(
+      account: FireworksAccount(resourceName: "accounts/personal", id: "personal"),
+      window: window,
+      scope: .account,
+      credential: Secret("fw_secret")
+    )
+
+    XCTAssertEqual(
+      result.rows.first?.start,
+      ISO8601DateFormatter().date(from: "2026-07-01T00:00:00Z")
+    )
+    XCTAssertEqual(result.rows.first?.end, window.end)
+  }
+
   func testCostsChecksCancellationBeforeRequestingFirstPage() async {
     let requests = RequestRecorder()
     let client = FireworksCostClient(http: { request in

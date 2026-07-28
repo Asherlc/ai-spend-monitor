@@ -352,8 +352,8 @@ public final class AppModel {
 
   public func dailySpend(for provider: ProviderID) -> [DailySpendPoint] {
     let calendar = Calendar.current
-    let providerRecords = records.filter { $0.provider == provider }
-    let reconciled = SpendReconciler().reconcile(providerRecords).included
+    let reconciled = SpendReconciler().reconcile(records).included
+      .filter { $0.provider == provider }
     let grouped = Dictionary(
       grouping: reconciled
     ) { calendar.startOfDay(for: $0.intervalStart) }
