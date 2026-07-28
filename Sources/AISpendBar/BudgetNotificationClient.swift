@@ -39,7 +39,17 @@ struct BudgetNotificationTransport: Sendable {
         try await center.requestAuthorization(options: options)
       },
       add: { request in
-        try await center.add(request)
+        try await withCheckedThrowingContinuation { continuation in
+          center.add(
+            request,
+            withCompletionHandler: { error in
+              if let error {
+                continuation.resume(throwing: error)
+              } else {
+                continuation.resume()
+              }
+            })
+        }
       }
     )
   }
