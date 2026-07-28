@@ -526,7 +526,7 @@ final class RefreshCoordinatorTests: XCTestCase {
     XCTAssertEqual(snapshot.summary.total, Money(4))
   }
 
-  func testMixedAttemptsRemainPartialAndSanitizeUnavailableMessage() async throws {
+  func testUnavailableOptionalSourceDoesNotFailSuccessfulFallback() async throws {
     let repository = try makeRepository()
     try enable([.claude], in: repository)
     let estimate = try record(
@@ -559,10 +559,11 @@ final class RefreshCoordinatorTests: XCTestCase {
 
     let snapshot = await coordinator.refresh(reason: .manual)
 
-    XCTAssertTrue(snapshot.summary.isPartial)
+    XCTAssertFalse(snapshot.summary.isPartial)
     let state = try XCTUnwrap(repository.providerStates()[.claude])
-    XCTAssertEqual(state.refreshStatus, .failed)
+    XCTAssertEqual(state.refreshStatus, .success)
     XCTAssertEqual(state.lastSuccessfulAt, now)
+    XCTAssertNil(state.lastFailureMessage)
     guard case .unavailable(let reason) = snapshot.attempts[.claude]?.first?.outcome else {
       return XCTFail("Expected unavailable source attempt")
     }
