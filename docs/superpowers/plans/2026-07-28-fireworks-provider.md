@@ -1078,7 +1078,111 @@ rtk git commit -m "feat: aggregate Fireworks account spend"
 
 ---
 
-### Task 6: App Bootstrap, Provider UI, and Existing-Install Backfill
+### Task 6: Adapter Hardening and Claude Code Fireworks Deduplication
+
+**Files:**
+- Modify: `Sources/AISpendProviders/Providers/Fireworks/FireworksAdapter.swift`
+- Modify: `Sources/AISpendCore/Ledger/SpendReconciler.swift`
+- Create: `Sources/AISpendCore/Ledger/FireworksModelIdentity.swift`
+- Modify: `Tests/AISpendProvidersTests/FireworksAdapterTests.swift`
+- Modify: `Tests/AISpendCoreTests/SpendReconcilerTests.swift`
+
+**Interfaces:**
+- Consumes: Fireworks cost-row model resource names and Claude Code local
+  estimates.
+- Produces: stable privacy-safe Fireworks model identities and explicit
+  cross-provider reconciliation only when Claude Code recorded a Fireworks
+  model or router resource.
+
+- [ ] **Step 1: Write failing adapter hardening tests**
+
+Add tests proving:
+
+- cancellation immediately after a successful injected `now` closure prevents
+  credential discovery and propagates `CancellationError`;
+- an unrelated model label containing an account ID as a substring (for
+  example account `work` and model `network-model`) is not rewritten;
+- model normalization and observation IDs do not change when unrelated sibling
+  accounts appear or disappear;
+- both `accounts/<owner>/models/<model>` and
+  `accounts/<owner>/routers/<router>` become stable privacy-safe canonical
+  model identities without persisting the owner/account path.
+
+- [ ] **Step 2: Run adapter tests and verify RED**
+
+```bash
+rtk swift test --filter FireworksAdapterTests
+```
+
+Expected: the missing post-clock cancellation check and substring-based
+redaction fail the new tests.
+
+- [ ] **Step 3: Implement boundary-aware stable Fireworks model identity**
+
+Create one shared pure canonicalizer in `AISpendCore`:
+
+- recognize only structurally valid `accounts/<owner>/models/<id>` and
+  `accounts/<owner>/routers/<id>` resource names;
+- return the resource kind plus the path after `models` or `routers`, never the
+  owner/account segment;
+- leave ordinary model labels byte-for-byte unchanged;
+- return `nil` for malformed Fireworks resource names.
+
+Use this canonicalizer for Fireworks actual rows. Do not replace arbitrary
+account-ID substrings in model labels. Keep complete-account-set sanitization
+for diagnostics, where privacy is more important than label stability.
+
+Add `Task.checkCancellation()` immediately after `now()` and before credential
+resolution.
+
+- [ ] **Step 4: Write failing Claude Code cross-provider reconciliation tests**
+
+Add tests proving:
+
+- a Claude local estimate whose model is
+  `accounts/fireworks/models/kimi-k2` is excluded when an overlapping Fireworks
+  actual record canonicalized to the same model exists;
+- the same behavior works for `accounts/fireworks/routers/kimi-k2`;
+- the Fireworks actual record remains included and its amount is counted once;
+- the Claude estimate remains when Fireworks actual data is absent, on an
+  adjacent interval, or for a different canonical model;
+- ordinary Claude model estimates never reconcile across provider boundaries.
+
+- [ ] **Step 5: Implement narrow cross-provider reconciliation**
+
+Keep the existing provider/account/model billing-group rule as the default.
+Add one explicit exception:
+
+- estimated record provider is `.claude`;
+- its model is a structurally valid Fireworks model/router resource;
+- actual record provider is `.fireworks`;
+- both canonical Fireworks model identities match;
+- their half-open intervals overlap.
+
+When all conditions hold, exclude the Claude estimate and add its amount to
+`excludedEstimatedAmount`. Do not infer Fireworks routing from a plain model
+name and do not suppress the estimate when no matching Fireworks actual exists.
+
+- [ ] **Step 6: Run focused and full tests**
+
+```bash
+rtk swift test --filter FireworksAdapterTests
+rtk swift test --filter SpendReconcilerTests
+rtk swift test
+```
+
+Expected: PASS.
+
+- [ ] **Step 7: Commit hardening and deduplication**
+
+```bash
+rtk git add Sources/AISpendCore Sources/AISpendProviders Tests/AISpendCoreTests Tests/AISpendProvidersTests
+rtk git commit -m "fix: deduplicate Claude Code Fireworks spend"
+```
+
+---
+
+### Task 7: App Bootstrap, Provider UI, and Existing-Install Backfill
 
 **Files:**
 - Modify: `Sources/AISpendBar/AISpendBarApp.swift`
@@ -1242,7 +1346,7 @@ rtk git commit -m "feat: surface Fireworks spend in AI Spend"
 
 ---
 
-### Task 7: Full Verification and Release Readiness
+### Task 8: Full Verification and Release Readiness
 
 **Files:**
 - Verify: `Sources/`

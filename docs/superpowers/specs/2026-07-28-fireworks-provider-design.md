@@ -185,6 +185,29 @@ inventing a ledger record.
 - Disabling Fireworks prevents credential, Keychain, file, subprocess, and
   network discovery through the existing provider enablement gate.
 
+## Claude Code Deduplication
+
+Claude Code can route requests through Fireworks' Anthropic-compatible
+endpoint. Its local session log then produces a Claude estimated record while
+Fireworks' usage-cost API produces the authoritative actual charge. Those two
+records must not both contribute to spend.
+
+Reconciliation recognizes this route only when the Claude log model is a
+structurally valid Fireworks resource:
+
+- `accounts/<owner>/models/<model>`;
+- `accounts/<owner>/routers/<router>`.
+
+The resource is canonicalized without its owner/account segment. When an
+overlapping Fireworks actual record has the same canonical model identity, the
+Fireworks record wins and the Claude local estimate is excluded. A plain
+Claude model name is never assumed to be Fireworks traffic. If matching
+Fireworks actual data is missing, stale, adjacent rather than overlapping, or
+for another model, the Claude estimate remains so the app does not hide spend.
+
+This is intentionally a narrow cross-provider exception to the normal
+provider/account/model reconciliation boundary.
+
 ## Documentation
 
 The README provider setup table will add Fireworks:
@@ -218,6 +241,9 @@ Tests will cover:
 - disabled-provider behavior through the refresh coordinator;
 - existing-installation provider-state backfill;
 - Fireworks provider presentation, icon, settings, and diagnostics;
+- Claude Code estimates routed through explicit Fireworks model or router
+  resources are superseded by matching Fireworks actual costs without
+  suppressing ordinary Claude estimates;
 - README and packaged runtime smoke coverage where provider enumeration is
   asserted.
 
