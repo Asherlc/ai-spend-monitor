@@ -37,13 +37,15 @@ public protocol LedgerRepository: AnyObject {
 
 @MainActor
 public final class SwiftDataLedgerRepository: LedgerRepository {
-  private let context: ModelContext
+  private let modelContainer: ModelContainer
+  private var context: ModelContext
   private let saveContext: (ModelContext) throws -> Void
   private let beforeStagingSource: (Int, String) throws -> Void
   private let jsonEncoder = JSONEncoder()
   private let jsonDecoder = JSONDecoder()
 
   public init(modelContainer: ModelContainer) {
+    self.modelContainer = modelContainer
     context = ModelContext(modelContainer)
     saveContext = { try $0.save() }
     beforeStagingSource = { _, _ in }
@@ -53,6 +55,7 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
     modelContainer: ModelContainer,
     saveContext: @escaping (ModelContext) throws -> Void
   ) {
+    self.modelContainer = modelContainer
     context = ModelContext(modelContainer)
     self.saveContext = saveContext
     beforeStagingSource = { _, _ in }
@@ -62,6 +65,7 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
     modelContainer: ModelContainer,
     beforeStagingSource: @escaping (Int, String) throws -> Void
   ) {
+    self.modelContainer = modelContainer
     context = ModelContext(modelContainer)
     saveContext = { try $0.save() }
     self.beforeStagingSource = beforeStagingSource
@@ -423,6 +427,7 @@ public final class SwiftDataLedgerRepository: LedgerRepository {
       try saveContext(context)
     } catch {
       context.rollback()
+      context = ModelContext(modelContainer)
       throw error
     }
   }
