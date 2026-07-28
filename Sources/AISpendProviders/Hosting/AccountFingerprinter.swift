@@ -13,9 +13,9 @@ public struct AccountFingerprinter: Sendable {
   }
 
   public init(key: Data) {
-    let symmetricKey = SymmetricKey(data: key)
     self.init { identity, namespace in
-      identity.withValue { value in
+      let symmetricKey = SymmetricKey(data: key)
+      return identity.withValue { value in
         keyedIdentifier(
           [namespace, value],
           key: symmetricKey

@@ -237,6 +237,28 @@ public final class AppModel {
     return needsAttention ? "\(amount) !" : amount
   }
 
+  public var menuBarBudgetProgress: MenuBarBudgetProgress? {
+    guard availability != .unavailable,
+      !snapshot.allDataIsStale,
+      let budget = budgetEvaluations.first,
+      budget.limit.amount > 0
+    else {
+      return nil
+    }
+    let ratio = snapshot.summary.total.amount / budget.limit.amount
+    let clampedRatio = min(max(ratio, 0), 1)
+    return MenuBarBudgetProgress(
+      fraction: NSDecimalNumber(decimal: clampedRatio).doubleValue,
+      percentage: ratio * 100,
+      limit: budget.limit
+    )
+  }
+
+  public var menuBarAccessibilityLabel: String? {
+    guard let progress = menuBarBudgetProgress else { return nil }
+    return "\(statusTitle), \(progress.accessibilityLabel)"
+  }
+
   public var headlineTitle: String {
     availability == .unavailable
       ? "No current data"

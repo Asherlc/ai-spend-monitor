@@ -223,7 +223,7 @@ jobs:
   release:
     name: Build and release macOS app bundle
     if: github.ref == 'refs/heads/master'
-    runs-on: macos-15
+    runs-on: macos-14
     timeout-minutes: 20
 
     steps:

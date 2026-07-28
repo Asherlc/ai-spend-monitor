@@ -26,12 +26,31 @@ struct AISpendBarApp: App {
     MenuBarExtra {
       SpendPopoverView(model: model)
     } label: {
-      Label(model.statusTitle, systemImage: model.statusSymbol)
+      menuBarLabel
     }
     .menuBarExtraStyle(.window)
 
     Settings {
       SettingsView(model: model)
+    }
+  }
+
+  @ViewBuilder
+  private var menuBarLabel: some View {
+    let label = Label {
+      Text(model.statusTitle)
+    } icon: {
+      if let progress = model.menuBarBudgetProgress {
+        MenuBarBudgetProgressIcon(progress: progress)
+      } else {
+        Image(systemName: model.statusSymbol)
+      }
+    }
+
+    if let accessibilityLabel = model.menuBarAccessibilityLabel {
+      label.accessibilityLabel(accessibilityLabel)
+    } else {
+      label
     }
   }
 }
