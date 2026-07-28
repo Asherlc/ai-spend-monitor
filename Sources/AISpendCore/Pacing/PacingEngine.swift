@@ -12,6 +12,7 @@ public struct BudgetEvaluation: Identifiable, Hashable, Sendable {
   public let state: BudgetPacingState
   public let projectedMargin: Money?
   public let exhaustionForecast: BudgetExhaustionForecast?
+  public let usageFraction: Double?
 }
 
 public struct PacingResult: Hashable, Sendable {
@@ -49,7 +50,8 @@ public struct PacingEngine: Sendable {
             limit: $0.limit,
             state: .unknown,
             projectedMargin: nil,
-            exhaustionForecast: nil
+            exhaustionForecast: nil,
+            usageFraction: nil
           )
         }
       )
@@ -69,7 +71,11 @@ public struct PacingEngine: Sendable {
             limit: $0.limit,
             state: .collecting,
             projectedMargin: nil,
-            exhaustionForecast: nil
+            exhaustionForecast: nil,
+            usageFraction: usageFraction(
+              spend: spend,
+              limit: $0.limit
+            )
           )
         }
       )
@@ -92,6 +98,10 @@ public struct PacingEngine: Sendable {
             now: now,
             elapsed: elapsed,
             monthEnd: window.end
+          ),
+          usageFraction: usageFraction(
+            spend: spend,
+            limit: budget.limit
           )
         )
       }
@@ -120,5 +130,11 @@ public struct PacingEngine: Sendable {
     return projectedDate < monthEnd
       ? .projected(projectedDate)
       : .lastsThroughMonth
+  }
+
+  private func usageFraction(spend: Money, limit: Money) -> Double {
+    let ratio = spend.amount / limit.amount
+    let clampedRatio = min(max(ratio, 0), 1)
+    return NSDecimalNumber(decimal: clampedRatio).doubleValue
   }
 }
