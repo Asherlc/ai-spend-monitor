@@ -26,7 +26,15 @@ struct AISpendBarApp: App {
     MenuBarExtra {
       SpendPopoverView(model: model)
     } label: {
-      Label(model.statusTitle, systemImage: model.statusSymbol)
+      Label {
+        Text(model.statusTitle)
+      } icon: {
+        if let progress = model.menuBarBudgetProgress {
+          MenuBarBudgetProgressIcon(progress: progress)
+        } else {
+          Image(systemName: model.statusSymbol)
+        }
+      }
     }
     .menuBarExtraStyle(.window)
 
