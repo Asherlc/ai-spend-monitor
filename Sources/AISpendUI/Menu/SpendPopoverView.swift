@@ -3,6 +3,7 @@ import AppKit
 import SwiftUI
 
 public struct SpendPopoverView: View {
+  @Environment(\.openSettings) private var openSettings
   @Bindable private var model: AppModel
 
   public init(model: AppModel) {
@@ -110,9 +111,21 @@ public struct SpendPopoverView: View {
 
   private var budgets: some View {
     VStack(alignment: .leading, spacing: 8) {
-      Text("BUDGETS")
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
+      HStack {
+        Text("BUDGETS")
+          .font(.caption.weight(.semibold))
+          .foregroundStyle(.secondary)
+        Spacer()
+        Button {
+          model.prepareToAddBudget()
+          showSettings()
+        } label: {
+          Label("Add Budget", systemImage: "plus")
+        }
+        .buttonStyle(.borderless)
+        .font(.caption)
+        .help("Add a monthly budget")
+      }
       if model.budgetEvaluations.isEmpty {
         Text("No enabled budgets")
           .font(.callout)
@@ -178,7 +191,9 @@ public struct SpendPopoverView: View {
       .disabled(model.isRefreshing)
       .help("Refresh spend")
       .accessibilityLabel("Refresh spend")
-      SettingsLink {
+      Button {
+        showSettings()
+      } label: {
         Image(systemName: "gearshape")
       }
       .buttonStyle(.borderless)
@@ -186,6 +201,11 @@ public struct SpendPopoverView: View {
       .accessibilityLabel("Open Settings")
     }
     .padding(12)
+  }
+
+  private func showSettings() {
+    openSettings()
+    NSApp.activate(ignoringOtherApps: true)
   }
 
   private func notice(

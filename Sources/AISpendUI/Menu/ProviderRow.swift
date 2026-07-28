@@ -40,8 +40,8 @@ public struct ProviderRow: View {
               .font(.callout)
               .foregroundStyle(.secondary)
           }
-          if presentation.availability == .available && provider.estimated.amount > 0 {
-            Text("\(SpendFormatting.estimated(provider.estimated)) estimated")
+          if let amountDetail = presentation.amountDetail {
+            Text(amountDetail)
               .font(.caption2)
               .foregroundStyle(.secondary)
           }

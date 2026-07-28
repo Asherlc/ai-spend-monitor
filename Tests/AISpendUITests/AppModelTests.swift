@@ -163,6 +163,41 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.providerRows.last?.attempts.count, 1)
   }
 
+  func testProviderAmountDetailDoesNotRepeatAnAllEstimatedTotal() {
+    let snapshot = Self.snapshot(
+      total: 50,
+      providers: [
+        ProviderSpendSummary(
+          id: .openAI,
+          actual: .zero,
+          estimated: Money(25),
+          models: []
+        ),
+        ProviderSpendSummary(
+          id: .claude,
+          actual: Money(20),
+          estimated: Money(5),
+          models: []
+        ),
+      ]
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    XCTAssertEqual(model.providerRows.first { $0.id == .openAI }?.amountDetail, "Estimated")
+    XCTAssertEqual(model.providerRows.first { $0.id == .claude }?.amountDetail, "~$5.00 estimated")
+  }
+
+  func testPreparingToAddBudgetSelectsBudgetSettings() {
+    let model = AppModel(
+      snapshot: Self.initialSnapshot,
+      refresh: { _ in Self.initialSnapshot }
+    )
+
+    model.prepareToAddBudget()
+
+    XCTAssertEqual(model.selectedSettingsTab, .budgets)
+  }
+
   func testProviderStatusUsesProviderSpecificDatesAndCacheAge() {
     let lastSuccess = Date(timeIntervalSince1970: 50)
     let lastAttempt = Date(timeIntervalSince1970: 100)
