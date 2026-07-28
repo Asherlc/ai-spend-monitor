@@ -187,6 +187,166 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(model.providerRows.first { $0.id == .claude }?.amountDetail, "~$5.00 estimated")
   }
 
+  func testMenuBarProgressUsesCurrentSpendAgainstLowestEnabledBudget() {
+    let snapshot = Self.snapshot(
+      total: 20,
+      providers: [
+        ProviderSpendSummary(
+          id: .openAI,
+          actual: Money(20),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(25),
+          isEnabled: false,
+          createdAt: .distantPast
+        ),
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(100),
+          isEnabled: true,
+          createdAt: .distantPast
+        ),
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(50),
+          isEnabled: true,
+          createdAt: .distantPast
+        ),
+      ]
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    guard let progress = model.menuBarBudgetProgress else {
+      return XCTFail("Expected budget progress")
+    }
+    XCTAssertEqual(progress.limit, Money(50))
+    XCTAssertEqual(progress.fraction, 0.4, accuracy: 0.0001)
+    XCTAssertEqual(progress.percentage, 40)
+    XCTAssertEqual(
+      progress.accessibilityLabel,
+      "40% of $50.00 budget used"
+    )
+  }
+
+  func testMenuBarProgressClampsRenderedArcButRetainsOverspendPercentage() {
+    let snapshot = Self.snapshot(
+      total: 75,
+      providers: [
+        ProviderSpendSummary(
+          id: .openAI,
+          actual: Money(75),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(50),
+          isEnabled: true,
+          createdAt: .distantPast
+        )
+      ]
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    XCTAssertEqual(model.menuBarBudgetProgress?.fraction, 1)
+    XCTAssertEqual(model.menuBarBudgetProgress?.percentage, 150)
+    XCTAssertEqual(
+      model.menuBarBudgetProgress?.accessibilityLabel,
+      "150% of $50.00 budget used"
+    )
+  }
+
+  func testMenuBarProgressIsAbsentWithoutAnEnabledBudget() {
+    let model = AppModel(
+      snapshot: Self.initialSnapshot,
+      refresh: { _ in Self.initialSnapshot }
+    )
+
+    XCTAssertNil(model.menuBarBudgetProgress)
+  }
+
+  func testMenuBarProgressIsAbsentWhenCurrentMonthDataIsUnavailable() {
+    let snapshot = Self.snapshot(
+      total: 20,
+      providers: [],
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(50),
+          isEnabled: true,
+          createdAt: .distantPast
+        )
+      ],
+      dataAvailability: .unavailable
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    XCTAssertNil(model.menuBarBudgetProgress)
+  }
+
+  func testMenuBarProgressIsAbsentWhenAllDataIsStale() {
+    let snapshot = Self.snapshot(
+      total: 20,
+      providers: [
+        ProviderSpendSummary(
+          id: .openAI,
+          actual: Money(20),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(50),
+          isEnabled: true,
+          createdAt: .distantPast
+        )
+      ],
+      allDataIsStale: true
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    XCTAssertNil(model.menuBarBudgetProgress)
+  }
+
+  func testMenuBarProgressRemainsAvailableForPartialCurrentData() {
+    let snapshot = Self.snapshot(
+      total: 20,
+      providers: [
+        ProviderSpendSummary(
+          id: .openAI,
+          actual: Money(20),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      budgets: [
+        BudgetDefinition(
+          id: UUID(),
+          limit: Money(50),
+          isEnabled: true,
+          createdAt: .distantPast
+        )
+      ],
+      isPartial: true
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    guard let progress = model.menuBarBudgetProgress else {
+      return XCTFail("Expected budget progress")
+    }
+    XCTAssertEqual(progress.fraction, 0.4, accuracy: 0.0001)
+    XCTAssertTrue(model.needsAttention)
+  }
+
   func testPreparingToAddBudgetSelectsBudgetSettings() {
     let model = AppModel(
       snapshot: Self.initialSnapshot,
@@ -314,7 +474,9 @@ final class AppModelTests: XCTestCase {
     providerAvailability: [ProviderID: CurrentMonthDataAvailability] = [:],
     monthWindow: MonthWindow? = nil,
     refreshedAt: Date = Date(timeIntervalSince1970: 100),
-    evaluatedAt: Date? = nil
+    evaluatedAt: Date? = nil,
+    isPartial: Bool = false,
+    allDataIsStale: Bool = false
   ) -> RefreshSnapshot {
     let actual = providers.reduce(Money.zero) { $0 + $1.actual }
     let estimated = providers.reduce(Money.zero) { $0 + $1.estimated }
@@ -328,7 +490,7 @@ final class AppModelTests: XCTestCase {
         actual: actual,
         estimated: estimated,
         providers: providers,
-        isPartial: false
+        isPartial: isPartial
       ),
       pacing: PacingEngine().evaluate(
         spend: Money(total),
@@ -336,10 +498,11 @@ final class AppModelTests: XCTestCase {
         now: now,
         window: window,
         hasAnyData: !providers.isEmpty,
-        allDataIsStale: false
+        allDataIsStale: allDataIsStale,
+        isPartial: isPartial
       ),
       attempts: attempts,
-      allDataIsStale: false,
+      allDataIsStale: allDataIsStale,
       refreshedAt: refreshedAt,
       evaluatedAt: evaluatedAt,
       monthWindow: window,
