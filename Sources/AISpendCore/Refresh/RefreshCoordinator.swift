@@ -263,7 +263,10 @@ public final class RefreshCoordinator {
             continue
           }
           let sanitizedAttempts = sanitize(result.attempts)
-          let failureMessage = firstProblemMessage(in: sanitizedAttempts)
+          let failureMessage = firstProblemMessage(
+            in: sanitizedAttempts,
+            refreshedAnySource: !result.refreshedSourceIDs.isEmpty
+          )
           let state = StoredProviderState(
             provider: provider,
             isEnabled: current.isEnabled,
@@ -734,14 +737,17 @@ public final class RefreshCoordinator {
   }
 
   private func firstProblemMessage(
-    in attempts: [SourceAttempt]
+    in attempts: [SourceAttempt],
+    refreshedAnySource: Bool
   ) -> String? {
     for attempt in attempts {
       switch attempt.outcome {
       case .succeeded:
         continue
       case .unavailable(let reason):
-        return reason
+        if !refreshedAnySource {
+          return reason
+        }
       case .failed(let message):
         return message
       }
