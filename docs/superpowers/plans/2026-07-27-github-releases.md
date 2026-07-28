@@ -68,7 +68,7 @@ assert_next_version() {
 assert_next_version "v0.1.0" ""
 assert_next_version "v0.1.1" $'v0.1.0\n'
 assert_next_version "v1.10.4" $'v1.9.9\nv0.50.0\nv1.10.3\n'
-assert_next_version "v3.0.0" $'junk\nv2.9.9\nv9.0.0-beta.1\n'
+assert_next_version "v2.9.10" $'junk\nv2.9.9\nv9.0.0-beta.1\n'
 ```
 
 - [ ] **Step 2: Make the test executable and verify it fails**
