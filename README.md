@@ -33,17 +33,15 @@ AI Spend requires macOS 14 Sonoma or later and currently displays USD only.
 
 ## Download and install
 
-Every successful push to `master` produces a downloadable app bundle through
-GitHub Actions.
+Every successful push to `master` publishes a versioned
+[GitHub Release](https://github.com/Asherlc/ai-spend-monitor/releases/latest)
+containing the app bundle.
 
-1. Open the
-   [App bundle workflow](https://github.com/Asherlc/ai-spend-monitor/actions/workflows/app-bundle.yml).
-2. Select the newest successful run for `master`.
-3. In **Artifacts**, download `AISpendBar-<commit SHA>`.
-4. Open the downloaded archive. It contains `AISpendBar.zip`; open that archive
-   too to extract `AISpendBar.app`.
-5. Drag `AISpendBar.app` into `/Applications`.
-6. Control-click the app, choose **Open**, then confirm **Open**.
+1. Open the latest GitHub Release.
+2. Download `AISpendBar.zip`.
+3. Open the archive to extract `AISpendBar.app`.
+4. Drag `AISpendBar.app` into `/Applications`.
+5. Control-click the app, choose **Open**, then confirm **Open**.
 
 The CI build is ad-hoc signed but is not Developer ID signed or notarized.
 Consequently, macOS may require the Control-click flow on first launch. If it
@@ -56,8 +54,8 @@ To remove the app, quit `AISpendBar` in Activity Monitor and move
 `/Applications/AISpendBar.app` to the Trash. App data is stored separately as
 described under [Privacy](#privacy).
 
-To update, download a newer artifact, quit the running copy, and replace the
-existing app in `/Applications`.
+To update, quit the running copy, download `AISpendBar.zip` from the latest
+GitHub Release, and replace the existing app in `/Applications`.
 
 ## First-run setup
 
