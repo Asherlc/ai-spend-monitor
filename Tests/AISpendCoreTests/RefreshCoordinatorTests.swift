@@ -405,7 +405,7 @@ final class RefreshCoordinatorTests: XCTestCase {
     )
   }
 
-  func testPartialProviderCoverageKeepsFreshRecordsAndMarksSummaryPartial() async throws {
+  func testPersonalScopeFallbackKeepsFreshRecordsWithoutMarkingSummaryPartial() async throws {
     let repository = try makeRepository()
     try enable([.fireworks], in: repository)
     let freshRecord = try record(
@@ -421,15 +421,20 @@ final class RefreshCoordinatorTests: XCTestCase {
         records: [freshRecord],
         attempts: [
           SourceAttempt(
+            strategyID: "fireworks-account-costs",
+            outcome: .unavailable(
+              reason: "Account-wide Fireworks permission unavailable; using personal spend."
+            )
+          ),
+          SourceAttempt(
             strategyID: "fireworks-self-costs",
             outcome: .succeeded(recordCount: 1)
-          )
+          ),
         ],
         refreshedSourceIDs: [freshRecord.sourceID],
         fetchedAt: fetchedAt,
-        coverage: .partial(
-          message: "Only authenticated-user spend is available."
-        )
+        coverage: .complete,
+        sourceAuthority: .allProviderSources
       )
     }
     let coordinator = makeCoordinator(
@@ -440,9 +445,11 @@ final class RefreshCoordinatorTests: XCTestCase {
     let snapshot = await coordinator.refresh(reason: .manual)
 
     XCTAssertEqual(snapshot.summary.total, Money(4))
-    XCTAssertTrue(snapshot.summary.isPartial)
-    XCTAssertEqual(snapshot.providerStates[.fireworks]?.refreshStatus, .partial)
+    XCTAssertFalse(snapshot.summary.isPartial)
+    XCTAssertEqual(snapshot.providerStates[.fireworks]?.refreshStatus, .success)
+    XCTAssertNil(snapshot.providerStates[.fireworks]?.lastFailureMessage)
     XCTAssertEqual(snapshot.providerAvailability[.fireworks], .available)
+    XCTAssertEqual(snapshot.attempts[.fireworks]?.count, 2)
   }
 
   func testEveryEnabledAdapterUsesTwentySecondTimeout() async throws {

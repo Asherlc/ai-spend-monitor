@@ -289,6 +289,54 @@ final class AppModelTests: XCTestCase {
     XCTAssertEqual(message, "Only authenticated-user spend is available.")
   }
 
+  func testPersonalScopeFallbackPresentsFreshWithoutNeedingAttention() throws {
+    let success = Date(timeIntervalSince1970: 100)
+    let state = StoredProviderState(
+      provider: .fireworks,
+      isEnabled: true,
+      lastAttemptAt: success,
+      lastSuccessfulAt: success,
+      refreshStatus: .success
+    )
+    let snapshot = Self.snapshot(
+      total: 1,
+      providers: [
+        ProviderSpendSummary(
+          id: .fireworks,
+          actual: Money(1),
+          estimated: .zero,
+          models: []
+        )
+      ],
+      providerStates: [.fireworks: state],
+      attempts: [
+        .fireworks: [
+          SourceAttempt(
+            strategyID: "fireworks-account-costs",
+            outcome: .unavailable(
+              reason: "Account-wide Fireworks permission unavailable; using personal spend."
+            )
+          ),
+          SourceAttempt(
+            strategyID: "fireworks-self-costs",
+            outcome: .succeeded(recordCount: 1)
+          ),
+        ]
+      ],
+      providerAvailability: [.fireworks: .available],
+      refreshedAt: success,
+      evaluatedAt: success,
+      isPartial: false
+    )
+    let model = AppModel(snapshot: snapshot, refresh: { _ in snapshot })
+
+    let row = try XCTUnwrap(model.providerRows.first { $0.id == .fireworks })
+    guard case .fresh = row.status.freshness else {
+      return XCTFail("Expected fresh Fireworks personal spend")
+    }
+    XCTAssertFalse(model.needsAttention)
+  }
+
   func testProviderRowsIncludeEnabledProviderWithoutCachedSpend() {
     let failedClaude = StoredProviderState(
       provider: .claude,
