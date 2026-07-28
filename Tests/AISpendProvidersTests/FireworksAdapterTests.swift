@@ -205,7 +205,7 @@ final class FireworksAdapterTests: XCTestCase {
     )
   }
 
-  func testAccountAuthorizationFailureFallsBackToPersonalAndMarksPartial() async throws {
+  func testAccountAuthorizationFailureFallsBackToPersonalAsCompleteCoverage() async throws {
     let scopes = FireworksScopeRecorder()
     let adapter = makeAdapter(
       costs: { _, _, scope, _ in
@@ -221,6 +221,8 @@ final class FireworksAdapterTests: XCTestCase {
 
     XCTAssertEqual(scopes.values, [.account, .personal])
     XCTAssertEqual(result.records.map(\.amount), [Money(1)])
+    XCTAssertEqual(result.coverage, .complete)
+    XCTAssertEqual(result.sourceAuthority, .allProviderSources)
     XCTAssertEqual(
       result.attempts.map(\.strategyID),
       [
@@ -230,10 +232,16 @@ final class FireworksAdapterTests: XCTestCase {
         "fireworks-self-costs",
       ]
     )
-    guard case .partial(let message) = result.coverage else {
-      return XCTFail("Expected partial coverage")
+    guard case .unavailable(let reason) = result.attempts[2].outcome else {
+      return XCTFail("Expected informational account-scope outcome")
     }
-    XCTAssertTrue(message.contains("authenticated-user"))
+    XCTAssertEqual(
+      reason,
+      "Account-wide Fireworks permission unavailable; using personal spend."
+    )
+    guard case .succeeded(recordCount: 1) = result.attempts[3].outcome else {
+      return XCTFail("Expected successful personal-scope outcome")
+    }
   }
 
   func testNoCredentialReturnsUnavailableSetupGuidance() async throws {
@@ -475,6 +483,103 @@ final class FireworksAdapterTests: XCTestCase {
         status == 401 || status == 403 ? [.account, .personal] : [.account],
         "Unexpected fallback behavior for HTTP \(status)"
       )
+    }
+  }
+
+  func testNonAuthorizationAccountFailureDoesNotUsePersonalFallback() async throws {
+    for status in [429, 500] {
+      for hasSuccessfulSibling in [true, false] {
+        let scopes = FireworksScopeRecorder()
+        let accounts = [
+          FireworksAccount(resourceName: "accounts/bad", id: "bad"),
+          FireworksAccount(resourceName: "accounts/good", id: "good"),
+        ]
+        let adapter = FireworksAdapter(
+          credential: { Secret("fw_secret") },
+          accounts: { _ in
+            hasSuccessfulSibling ? accounts : [accounts[0]]
+          },
+          costs: { account, _, scope, _ in
+            scopes.append(scope)
+            if account.id == "bad" {
+              throw ProviderClientError.httpStatus(status)
+            }
+            return fireworksResult(amount: 2)
+          },
+          fingerprinter: AccountFingerprinter(key: Data(repeating: 3, count: 32)),
+          now: { juneDate() }
+        )
+
+        let result = try await adapter.fetch(window: juneWindow())
+
+        XCTAssertEqual(
+          scopes.values,
+          hasSuccessfulSibling ? [.account, .account] : [.account],
+          "Unexpected fallback for HTTP \(status)"
+        )
+        if hasSuccessfulSibling {
+          XCTAssertEqual(result.records.map(\.amount), [Money(2)])
+          guard case .partial = result.coverage else {
+            return XCTFail("Expected partial coverage for HTTP \(status)")
+          }
+        } else {
+          XCTAssertTrue(result.records.isEmpty)
+          XCTAssertEqual(result.coverage, .complete)
+        }
+        XCTAssertEqual(result.sourceAuthority, .refreshedSources)
+      }
+    }
+  }
+
+  func testPersonalFallbackFailureRemainsFailedAccount() async throws {
+    for hasSuccessfulSibling in [true, false] {
+      let scopes = FireworksScopeRecorder()
+      let accounts = [
+        FireworksAccount(resourceName: "accounts/bad", id: "bad"),
+        FireworksAccount(resourceName: "accounts/good", id: "good"),
+      ]
+      let adapter = FireworksAdapter(
+        credential: { Secret("fw_secret") },
+        accounts: { _ in
+          hasSuccessfulSibling ? accounts : [accounts[0]]
+        },
+        costs: { account, _, scope, _ in
+          scopes.append(scope)
+          if account.id == "bad" {
+            if scope == .account {
+              throw ProviderClientError.httpStatus(403)
+            }
+            throw ProviderClientError.httpStatus(500)
+          }
+          return fireworksResult(amount: 2)
+        },
+        fingerprinter: AccountFingerprinter(key: Data(repeating: 3, count: 32)),
+        now: { juneDate() }
+      )
+
+      let result = try await adapter.fetch(window: juneWindow())
+
+      XCTAssertEqual(
+        scopes.values,
+        hasSuccessfulSibling ? [.account, .personal, .account] : [.account, .personal]
+      )
+      let personalAttempt = try XCTUnwrap(
+        result.attempts.last { $0.strategyID == "fireworks-self-costs" }
+      )
+      guard case .failed(let message) = personalAttempt.outcome else {
+        return XCTFail("Expected failed personal-scope attempt")
+      }
+      XCTAssertEqual(message, "Fireworks request failed (HTTP 500).")
+      if hasSuccessfulSibling {
+        XCTAssertEqual(result.records.map(\.amount), [Money(2)])
+        guard case .partial = result.coverage else {
+          return XCTFail("Expected partial coverage")
+        }
+      } else {
+        XCTAssertTrue(result.records.isEmpty)
+        XCTAssertEqual(result.coverage, .complete)
+      }
+      XCTAssertEqual(result.sourceAuthority, .refreshedSources)
     }
   }
 

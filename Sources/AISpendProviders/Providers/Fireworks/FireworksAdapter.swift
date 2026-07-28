@@ -136,7 +136,6 @@ public struct FireworksAdapter: ProviderAdapter {
 
     var records: [SpendRecord] = []
     var refreshedSourceIDs = Set<String>()
-    var usedPersonalScope = false
     var failedAccount = false
 
     for account in discoveredAccounts {
@@ -158,28 +157,35 @@ public struct FireworksAdapter: ProviderAdapter {
           throw CancellationError()
         } catch {
           try Task.checkCancellation()
-          attempts.append(
-            SourceAttempt(
-              strategyID: "fireworks-account-costs",
-              outcome: .failed(
-                redactedMessage: safeMessage(
-                  for: error,
-                  credential: resolvedCredential,
-                  accounts: discoveredAccounts
+          guard Self.isAuthorizationFailure(error) else {
+            attempts.append(
+              SourceAttempt(
+                strategyID: "fireworks-account-costs",
+                outcome: .failed(
+                  redactedMessage: safeMessage(
+                    for: error,
+                    credential: resolvedCredential,
+                    accounts: discoveredAccounts
+                  )
                 )
               )
             )
-          )
-          guard Self.isAuthorizationFailure(error) else {
             failedAccount = true
             continue
           }
+          attempts.append(
+            SourceAttempt(
+              strategyID: "fireworks-account-costs",
+              outcome: .unavailable(
+                reason: "Account-wide Fireworks permission unavailable; using personal spend."
+              )
+            )
+          )
 
           do {
             try Task.checkCancellation()
             result = try await costs(account, window, .personal, resolvedCredential)
             scope = .personal
-            usedPersonalScope = true
           } catch is CancellationError {
             throw CancellationError()
           } catch {
@@ -267,10 +273,6 @@ public struct FireworksAdapter: ProviderAdapter {
       coverage = .complete
     } else if failedAccount {
       coverage = .partial(message: "Some Fireworks account spend is unavailable.")
-    } else if usedPersonalScope {
-      coverage = .partial(
-        message: "Only authenticated-user Fireworks spend is available for at least one account."
-      )
     } else {
       coverage = .complete
     }
