@@ -45,10 +45,24 @@ jobs:
         id: release
         run: |
           git fetch --force --tags origin
-          release_version="$(git tag --list | Scripts/next_release_version.sh)"
+          existing_release="$(
+            git tag --points-at "$GITHUB_SHA" --list \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | tail -n 1 \
+              || true
+          )"
+          if [[ -n "$existing_release" ]]; then
+            release_version="$existing_release"
+            publish=false
+          else
+            release_version="$(git tag --list | Scripts/next_release_version.sh)"
+            publish=true
+          fi
           echo "version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
+        if: steps.release.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}

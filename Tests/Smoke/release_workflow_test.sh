@@ -22,5 +22,9 @@ require_text "swift test"
 require_text "Tests/Smoke/release_version_test.sh"
 require_text "Tests/Smoke/app_bundle_test.sh"
 require_text "Scripts/next_release_version.sh"
+require_text 'git tag --points-at "$GITHUB_SHA" --list'
+require_text "grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$'"
+require_text 'echo "publish=$publish" >> "$GITHUB_OUTPUT"'
+require_text "if: steps.release.outputs.publish == 'true'"
 require_text 'gh release create "$RELEASE_VERSION" AISpendBar.zip'
 require_text "--generate-notes"

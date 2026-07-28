@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Publish every successful `master` build as a durable GitHub Release with an automatically incremented patch version and document the new download flow.
+**Goal:** Publish each successful `master` commit as one durable GitHub Release with an automatically incremented patch version and document the new download flow.
 
-**Architecture:** A small tested shell utility calculates the next stable semantic version from tags supplied on standard input. The existing GitHub Actions workflow serializes release runs, executes all current quality gates, calls the utility after refreshing tags, and publishes the tested archive with GitHub CLI; the README points users to the resulting Releases page.
+**Architecture:** A small tested shell utility calculates the next stable semantic version from tags supplied on standard input. The existing GitHub Actions workflow serializes release runs, executes all current quality gates, refreshes tags, skips publication when the current commit already has a stable release tag, and otherwise publishes the tested archive with GitHub CLI; the README points users to the resulting Releases page.
 
 **Tech Stack:** Bash 3.2+, Git, GitHub Actions, GitHub CLI, Swift Package Manager, Markdown
 
@@ -12,7 +12,7 @@
 
 - Releases are created only for `master`.
 - The first release is `v0.1.0`; later releases increment only the patch component of the highest stable `vMAJOR.MINOR.PATCH` tag.
-- Every successful `master` push and successful manual dispatch on `master` creates one release.
+- Each successful `master` commit creates at most one release; manual reruns and dispatches for an already released commit reuse its version and do not publish a second release.
 - Tests, packaging, and the existing app-bundle smoke test must pass before version calculation or publication.
 - Release executions are serialized and must never cancel an in-progress release.
 - The release contains `AISpendBar.zip`, uses GitHub-generated notes, and has a title equal to its version.
@@ -180,6 +180,10 @@ require_text "swift test"
 require_text "Tests/Smoke/release_version_test.sh"
 require_text "Tests/Smoke/app_bundle_test.sh"
 require_text "Scripts/next_release_version.sh"
+require_text 'git tag --points-at "$GITHUB_SHA" --list'
+require_text "grep -E '^v[0-9]+\\.[0-9]+\\.[0-9]+$'"
+require_text 'echo "publish=$publish" >> "$GITHUB_OUTPUT"'
+require_text "if: steps.release.outputs.publish == 'true'"
 require_text 'gh release create "$RELEASE_VERSION" AISpendBar.zip'
 require_text "--generate-notes"
 ```
@@ -247,10 +251,24 @@ jobs:
         id: release
         run: |
           git fetch --force --tags origin
-          release_version="$(git tag --list | Scripts/next_release_version.sh)"
+          existing_release="$(
+            git tag --points-at "$GITHUB_SHA" --list \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | tail -n 1 \
+              || true
+          )"
+          if [[ -n "$existing_release" ]]; then
+            release_version="$existing_release"
+            publish=false
+          else
+            release_version="$(git tag --list | Scripts/next_release_version.sh)"
+            publish=true
+          fi
           echo "version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
       - name: Publish GitHub Release
+        if: steps.release.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ steps.release.outputs.version }}

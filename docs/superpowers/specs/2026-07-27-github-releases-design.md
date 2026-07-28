@@ -2,18 +2,21 @@
 
 ## Goal
 
-Distribute every successful `master` build of AI Spend as a durable GitHub
-Release instead of a short-lived GitHub Actions artifact. Each release must
-have a unique semantic version tag and a directly downloadable
+Distribute each successful `master` commit of AI Spend as a durable GitHub
+Release instead of a short-lived GitHub Actions artifact. Each released commit
+must have one unique semantic version tag and a directly downloadable
 `AISpendBar.zip` asset.
 
 ## Release trigger and versioning
 
 The existing app-bundle workflow remains triggered by pushes to `master` and
-manual workflow dispatches. A successful run determines the next version from
-the repository's existing tags:
+manual workflow dispatches. After refreshing remote tags, a successful run
+first checks for an exact stable `vMAJOR.MINOR.PATCH` tag pointing at the
+current commit:
 
-- If no tag matching `vMAJOR.MINOR.PATCH` exists, the first version is
+- If the current commit already has a stable release tag, the workflow reuses
+  that version and skips publication.
+- If no stable release tag exists anywhere, the first version is
   `v0.1.0`.
 - Otherwise, the workflow selects the highest semantic version and increments
   its patch component by one.
@@ -21,8 +24,8 @@ the repository's existing tags:
 
 The workflow fetches full tag history before calculating the version. Release
 runs are serialized so two nearby pushes cannot choose the same next version.
-A manual dispatch follows the same rules and therefore also creates a new
-patch release.
+Manual reruns and dispatches for an already released commit are idempotent and
+do not create a second patch release.
 
 ## Build and publication flow
 
@@ -33,9 +36,11 @@ The workflow keeps the existing quality gates:
 3. Package `AISpendBar.app`.
 4. Run the app-bundle smoke test.
 5. Create `AISpendBar.zip`.
-6. Calculate the next patch version.
-7. Create a Git tag and GitHub Release for the tested commit.
-8. Attach `AISpendBar.zip` to the release.
+6. Reuse the current commit's stable release tag or calculate the next patch
+   version.
+7. If the commit is not already released, create a Git tag and GitHub Release
+   for the tested commit.
+8. Attach `AISpendBar.zip` to a newly created release.
 
 The release title is the calculated version. GitHub-generated release notes
 summarize commits since the preceding release. The workflow receives
@@ -44,8 +49,9 @@ release, and asset.
 
 No release or tag is created if the build, tests, packaging, or smoke test
 fails. If publication itself fails, rerunning the workflow must not overwrite
-an unrelated release. The serialized workflow recalculates the next available
-version from remote tags immediately before publication.
+an unrelated release. The serialized workflow refreshes remote tags
+immediately before publication and skips publication when the current commit
+already has a stable release tag.
 
 The app remains ad-hoc signed and unnotarized. This change improves
 distribution and retention but does not change macOS trust behavior.
