@@ -61,7 +61,9 @@ public struct FireworksAdapter: ProviderAdapter {
 
     let resolvedCredential: Secret
     do {
-      guard let value = try credential() else {
+      let value = try credential()
+      try Task.checkCancellation()
+      guard let value else {
         attempts.append(
           SourceAttempt(
             strategyID: "fireworks-credential",
@@ -82,6 +84,7 @@ public struct FireworksAdapter: ProviderAdapter {
     } catch is CancellationError {
       throw CancellationError()
     } catch {
+      try Task.checkCancellation()
       attempts.append(
         SourceAttempt(
           strategyID: "fireworks-credential",
@@ -114,6 +117,7 @@ public struct FireworksAdapter: ProviderAdapter {
     } catch is CancellationError {
       throw CancellationError()
     } catch {
+      try Task.checkCancellation()
       attempts.append(
         SourceAttempt(
           strategyID: "fireworks-account-discovery",
@@ -147,6 +151,7 @@ public struct FireworksAdapter: ProviderAdapter {
         } catch is CancellationError {
           throw CancellationError()
         } catch {
+          try Task.checkCancellation()
           attempts.append(
             SourceAttempt(
               strategyID: "fireworks-account-costs",
@@ -172,6 +177,7 @@ public struct FireworksAdapter: ProviderAdapter {
           } catch is CancellationError {
             throw CancellationError()
           } catch {
+            try Task.checkCancellation()
             attempts.append(
               SourceAttempt(
                 strategyID: "fireworks-self-costs",
@@ -193,6 +199,7 @@ public struct FireworksAdapter: ProviderAdapter {
           try Task.checkCancellation()
           let normalized = try normalize(
             result,
+            account: account,
             accountFingerprint: fingerprint,
             sourceID: sourceID,
             scope: scope,
@@ -212,6 +219,7 @@ public struct FireworksAdapter: ProviderAdapter {
         } catch is CancellationError {
           throw CancellationError()
         } catch {
+          try Task.checkCancellation()
           attempts.append(
             SourceAttempt(
               strategyID: scope == .account
@@ -231,6 +239,7 @@ public struct FireworksAdapter: ProviderAdapter {
       } catch is CancellationError {
         throw CancellationError()
       } catch {
+        try Task.checkCancellation()
         attempts.append(
           SourceAttempt(
             strategyID: "fireworks-account-costs",
@@ -270,6 +279,7 @@ public struct FireworksAdapter: ProviderAdapter {
 
   private func normalize(
     _ result: FireworksCostResult,
+    account: FireworksAccount,
     accountFingerprint: String,
     sourceID: String,
     scope: FireworksCostScope,
@@ -282,10 +292,11 @@ public struct FireworksAdapter: ProviderAdapter {
     }
 
     var normalized = try result.rows.map {
-      try record(
+      let model = Self.privacySafeModel($0.model, account: account)
+      return try record(
         start: $0.start,
         end: $0.end,
-        model: $0.model,
+        model: model,
         amount: $0.amount,
         accountFingerprint: accountFingerprint,
         sourceID: sourceID,
@@ -368,6 +379,34 @@ public struct FireworksAdapter: ProviderAdapter {
       return false
     }
     return status == 401 || status == 403
+  }
+
+  private static func privacySafeModel(
+    _ model: String,
+    account: FireworksAccount
+  ) -> String {
+    let components = model.split(separator: "/", omittingEmptySubsequences: false)
+    let label: String
+    if components.first == "accounts" {
+      guard
+        let modelsIndex = components.firstIndex(of: "models"),
+        modelsIndex > components.startIndex,
+        components.index(after: modelsIndex) < components.endIndex
+      else {
+        return "unknown"
+      }
+      let modelComponents = components[components.index(after: modelsIndex)...]
+      guard !modelComponents.contains(where: \.isEmpty) else {
+        return "unknown"
+      }
+      label = modelComponents.joined(separator: "/")
+    } else {
+      label = model
+    }
+    guard !account.id.isEmpty else {
+      return label
+    }
+    return label.replacingOccurrences(of: account.id, with: "[account]")
   }
 
   private func safeMessage(

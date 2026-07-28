@@ -47,6 +47,63 @@ final class FireworksAdapterTests: XCTestCase {
     XCTAssertFalse(privateIdentifiers.contains { $0 == "work" || $0.hasSuffix(":work") })
   }
 
+  func testResourceQualifiedModelsRemoveAccountIdentityAndStillAggregateByModel() async throws {
+    let rawAccountIDs = ["tenant-alpha-secret", "tenant-beta-secret"]
+    let rawResourceNames = rawAccountIDs.map { "accounts/\($0)" }
+    let adapter = FireworksAdapter(
+      credential: { Secret("fw_secret") },
+      accounts: { _ in
+        zip(rawResourceNames, rawAccountIDs).map {
+          FireworksAccount(resourceName: $0.0, id: $0.1)
+        }
+      },
+      costs: { account, _, _, _ in
+        fireworksResult(
+          amount: 1,
+          model: "\(account.resourceName)/models/kimi-k2"
+        )
+      },
+      fingerprinter: AccountFingerprinter(key: Data(repeating: 4, count: 32)),
+      now: { juneDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(result.records.map(\.model), ["kimi-k2", "kimi-k2"])
+    XCTAssertEqual(
+      Dictionary(grouping: result.records, by: \.model).mapValues(\.count),
+      ["kimi-k2": 2]
+    )
+    let persistedRecords = try JSONEncoder().encode(result.records)
+    let output = [
+      String(decoding: persistedRecords, as: UTF8.self),
+      String(describing: result.attempts),
+      String(describing: result.coverage),
+      String(describing: result.refreshedSourceIDs),
+    ].joined(separator: "\n")
+    for rawValue in rawAccountIDs + rawResourceNames {
+      XCTAssertFalse(output.contains(rawValue), "Leaked raw Fireworks identity: \(rawValue)")
+    }
+  }
+
+  func testQualifiedModelIdentifierAlsoRedactsEmbeddedAccountID() async throws {
+    let account = FireworksAccount(
+      resourceName: "accounts/tenant-private-id",
+      id: "tenant-private-id"
+    )
+    let adapter = makeAdapter(account: account) { _, _, _, _ in
+      fireworksResult(
+        amount: 1,
+        model: "accounts/tenant-private-id/models/tenant-private-id-fine-tune"
+      )
+    }
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(result.records.map(\.model), ["[account]-fine-tune"])
+    XCTAssertFalse(String(describing: result.records).contains("tenant-private-id"))
+  }
+
   func testAccountAuthorizationFailureFallsBackToPersonalAndMarksPartial() async throws {
     let scopes = FireworksScopeRecorder()
     let adapter = makeAdapter(
@@ -314,6 +371,89 @@ final class FireworksAdapterTests: XCTestCase {
       XCTAssertTrue(true)
     } catch {
       XCTFail("Expected CancellationError, got \(error)")
+    }
+  }
+
+  func testCancelledCredentialErrorIsRethrownAsCancellation() async {
+    let adapter = FireworksAdapter(
+      credential: {
+        withUnsafeCurrentTask { $0?.cancel() }
+        throw URLError(.cancelled)
+      },
+      accounts: { _ in [] },
+      costs: { _, _, _, _ in fireworksResult(amount: 0) },
+      now: { juneDate() }
+    )
+
+    await assertCancellation(from: adapter, seam: "credential")
+  }
+
+  func testCancelledDiscoveryErrorIsRethrownAsCancellation() async {
+    let adapter = FireworksAdapter(
+      credential: { Secret("fw_secret") },
+      accounts: { _ in
+        withUnsafeCurrentTask { $0?.cancel() }
+        throw NSError(domain: "discovery stopped", code: 1)
+      },
+      costs: { _, _, _, _ in fireworksResult(amount: 0) },
+      now: { juneDate() }
+    )
+
+    await assertCancellation(from: adapter, seam: "discovery")
+  }
+
+  func testCancelledAccountQueryErrorIsRethrownAsCancellation() async {
+    let adapter = makeAdapter { _, _, _, _ in
+      withUnsafeCurrentTask { $0?.cancel() }
+      throw URLError(.cancelled)
+    }
+
+    await assertCancellation(from: adapter, seam: "account query")
+  }
+
+  func testCancelledSelfFallbackErrorIsRethrownAsCancellation() async {
+    let adapter = makeAdapter { _, _, scope, _ in
+      if scope == .account {
+        throw ProviderClientError.httpStatus(403)
+      }
+      withUnsafeCurrentTask { $0?.cancel() }
+      throw NSError(domain: "self fallback stopped", code: 1)
+    }
+
+    await assertCancellation(from: adapter, seam: "SELF fallback")
+  }
+
+  func testCancelledFingerprintErrorIsRethrownAsCancellation() async {
+    let adapter = FireworksAdapter(
+      credential: { Secret("fw_secret") },
+      accounts: { _ in
+        [FireworksAccount(resourceName: "accounts/personal", id: "personal")]
+      },
+      costs: { _, _, _, _ in fireworksResult(amount: 0) },
+      fingerprinter: AccountFingerprinter { _, _ in
+        withUnsafeCurrentTask { $0?.cancel() }
+        throw NSError(domain: "fingerprint stopped", code: 1)
+      },
+      now: { juneDate() }
+    )
+
+    await assertCancellation(from: adapter, seam: "fingerprint")
+  }
+
+  private func assertCancellation(
+    from adapter: FireworksAdapter,
+    seam: String
+  ) async {
+    let task = Task {
+      try await adapter.fetch(window: juneWindow())
+    }
+    do {
+      _ = try await task.value
+      XCTFail("Expected cancellation from \(seam)")
+    } catch is CancellationError {
+      XCTAssertTrue(true)
+    } catch {
+      XCTFail("Expected CancellationError from \(seam), got \(error)")
     }
   }
 
