@@ -38,10 +38,10 @@ public struct PrivacySettingsView: View {
           detail: "Reads only documented provider configuration and usage-log locations."
         )
         permission(
-          icon: "key",
-          title: "Keychain",
+          icon: "key.horizontal",
+          title: "Private local key",
           detail:
-            "Reuses allowlisted credentials in place; secrets are never copied into the spend ledger."
+            "Account fingerprints use a random key stored only in this app's private local data directory."
         )
         permission(
           icon: "safari",
