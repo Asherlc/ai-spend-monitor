@@ -617,7 +617,7 @@ public final class AppModel {
     return value
   }
 
-  private static func budgetOrder(
+  private nonisolated static func budgetOrder(
     _ lhs: BudgetDefinition,
     _ rhs: BudgetDefinition
   ) -> Bool {
