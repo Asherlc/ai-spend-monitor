@@ -407,6 +407,15 @@ private enum CodexLineageIndex {
         }
       let hasCopiedPrefixEvidence =
         file.hasEmbeddedAncestorMetadata || matchesParentSnapshot || locallyConfirmsBaseline
+      let hasIndependentCounterEvidence =
+        firstChildSnapshot.map { !$0.totals.isZero && $0.localBaseline == .zero } ?? false
+      if baseline == nil && !hasIndependentCounterEvidence {
+        return CodexLineage(
+          inheritedBaseline: nil,
+          isUnresolvedFork: true,
+          fingerprints: [file.fingerprint, parent.fingerprint]
+        )
+      }
       if !hasCopiedPrefixEvidence {
         return CodexLineage(
           inheritedBaseline: nil,
