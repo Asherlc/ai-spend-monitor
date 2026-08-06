@@ -2,7 +2,9 @@ import AISpendCore
 import Foundation
 
 public struct CodexLogScanner: Sendable {
-  private let scanner: LocalLogScanner
+  private let sessionRoots: [URL]
+  private let priceCatalog: PriceCatalog
+  private let calendar: Calendar
 
   public init(
     priceCatalog: PriceCatalog,
@@ -21,7 +23,14 @@ public struct CodexLogScanner: Sendable {
     priceCatalog: PriceCatalog,
     calendar: Calendar
   ) {
-    scanner = LocalLogScanner(
+    self.sessionRoots = sessionRoots
+    self.priceCatalog = priceCatalog
+    self.calendar = calendar
+  }
+
+  public func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
+    let lineage = try CodexLineageIndex.build(sessionRoots: sessionRoots, window: window)
+    return try LocalLogScanner(
       provider: .openAI,
       sessionRoots: sessionRoots,
       priceCatalog: priceCatalog,
@@ -29,21 +38,22 @@ public struct CodexLogScanner: Sendable {
       candidateLine: {
         $0.range(of: Self.turnContextMarker) != nil
           || $0.range(of: Self.tokenCountMarker) != nil
+          || $0.range(of: Self.sessionMetadataMarker) != nil
       },
-      parser: Self.parse
-    )
-  }
-
-  public func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
-    try scanner.scan(window: window, fetchedAt: fetchedAt)
+      parser: { object, context in
+        Self.parse(object, context: &context, lineage: lineage[context.sourcePath])
+      }
+    ).scan(window: window, fetchedAt: fetchedAt)
   }
 
   private static let turnContextMarker = Data(#""turn_context""#.utf8)
-  private static let tokenCountMarker = Data(#""token_count""#.utf8)
+  fileprivate static let tokenCountMarker = Data(#""token_count""#.utf8)
+  fileprivate static let sessionMetadataMarker = Data(#""session_meta""#.utf8)
 
   private static func parse(
     _ object: [String: Any],
-    context: inout LogParseContext
+    context: inout LogParseContext,
+    lineage: CodexLineage?
   ) -> LocalUsage? {
     if object["type"] as? String == "turn_context",
       let payload = object["payload"] as? [String: Any],
@@ -59,15 +69,26 @@ public struct CodexLogScanner: Sendable {
       let payload = object["payload"] as? [String: Any],
       payload["type"] as? String == "token_count",
       let model = payload["model"] as? String ?? context.model,
-      let info = payload["info"] as? [String: Any],
-      let usage = info["last_token_usage"] as? [String: Any],
-      let totalInput = integer(usage["input_tokens"]),
-      let output = integer(usage["output_tokens"])
+      let info = payload["info"] as? [String: Any]
     else {
       return nil
     }
-    let cachedInput = integer(usage["cached_input_tokens"]) ?? 0
-    guard totalInput >= cachedInput, cachedInput >= 0, output >= 0 else {
+    let totalObject = info["total_token_usage"] as? [String: Any]
+    let lastObject = info["last_token_usage"] as? [String: Any]
+    let total = totalObject.flatMap(CodexTokenCounters.init)
+    let last = lastObject.flatMap(CodexTokenCounters.init)
+    guard
+      totalObject == nil || total != nil,
+      lastObject == nil || last != nil,
+      total != nil || last != nil
+    else {
+      return nil
+    }
+    if context.codexUsageState == nil {
+      context.codexUsageState = CodexUsageState(lineage: lineage)
+    }
+    guard let delta = context.codexUsageState?.consume(total: total, last: last), !delta.isZero
+    else {
       return nil
     }
     let eventID =
@@ -77,15 +98,305 @@ public struct CodexLogScanner: Sendable {
         "position:\(context.relativePath):\(context.lineNumber)",
         "timestamp:\(timestampValue)",
         "model:\(model)",
-        "tokens:\(totalInput):\(cachedInput):\(output)",
+        "tokens:\(delta.input):\(delta.cached):\(delta.output)",
       ].joined(separator: "|")
     return LocalUsage(
       eventID: eventID,
       timestamp: timestamp,
       model: model,
-      inputTokens: totalInput - cachedInput,
-      cachedInputTokens: cachedInput,
-      outputTokens: output
+      inputTokens: delta.input - delta.cached,
+      cachedInputTokens: delta.cached,
+      outputTokens: delta.output
     )
+  }
+}
+
+struct CodexTokenCounters: Hashable, Sendable {
+  let input: Int
+  let cached: Int
+  let output: Int
+
+  init?(_ object: [String: Any]) {
+    guard
+      let input = integer(object["input_tokens"]),
+      let output = integer(object["output_tokens"])
+    else {
+      return nil
+    }
+    let cached = integer(object["cached_input_tokens"] ?? object["cache_read_input_tokens"]) ?? 0
+    guard input >= cached, cached >= 0, output >= 0 else {
+      return nil
+    }
+    self.input = input
+    self.cached = cached
+    self.output = output
+  }
+
+  init(input: Int, cached: Int, output: Int) {
+    self.input = input
+    self.cached = min(cached, input)
+    self.output = output
+  }
+
+  static let zero = Self(input: 0, cached: 0, output: 0)
+  var isZero: Bool { input == 0 && cached == 0 && output == 0 }
+
+  func positiveGrowth(from baseline: Self) -> Self {
+    let input = max(0, input - baseline.input)
+    return Self(
+      input: input,
+      cached: min(input, max(0, cached - baseline.cached)),
+      output: max(0, output - baseline.output)
+    )
+  }
+
+  func componentwiseMaximum(with other: Self) -> Self {
+    Self(
+      input: max(input, other.input),
+      cached: max(cached, other.cached),
+      output: max(output, other.output)
+    )
+  }
+
+  func componentwiseMinimum(with other: Self) -> Self {
+    Self(
+      input: min(input, other.input),
+      cached: min(cached, other.cached),
+      output: min(output, other.output)
+    )
+  }
+
+  func adding(_ other: Self) -> Self {
+    Self(
+      input: input + other.input,
+      cached: cached + other.cached,
+      output: output + other.output
+    )
+  }
+}
+
+struct CodexLineage: Sendable {
+  let inheritedBaseline: CodexTokenCounters?
+  let isUnresolvedFork: Bool
+}
+
+struct CodexUsageState {
+  private var watermark: CodexTokenCounters?
+  private var sawInterleavedTotals = false
+  private let suppressUsage: Bool
+  private let hasInheritedBaseline: Bool
+
+  init(lineage: CodexLineage?) {
+    watermark = lineage?.inheritedBaseline
+    suppressUsage = lineage?.isUnresolvedFork == true
+    hasInheritedBaseline = lineage?.inheritedBaseline != nil
+  }
+
+  mutating func consume(
+    total: CodexTokenCounters?,
+    last: CodexTokenCounters?
+  ) -> CodexTokenCounters? {
+    guard !suppressUsage else { return nil }
+    guard let total else {
+      guard !hasInheritedBaseline, let last else { return nil }
+      watermark = (watermark ?? .zero).adding(last)
+      return last
+    }
+    let baseline = watermark ?? .zero
+    if total.input < baseline.input || total.cached < baseline.cached
+      || total.output < baseline.output
+    {
+      sawInterleavedTotals = true
+    }
+    var delta = total.positiveGrowth(from: baseline)
+    if sawInterleavedTotals, let last {
+      delta = delta.componentwiseMinimum(with: last)
+    }
+    watermark = baseline.componentwiseMaximum(with: total)
+    return delta
+  }
+}
+
+private enum CodexLineageIndex {
+  private struct Snapshot {
+    let timestamp: Date
+    let totals: CodexTokenCounters
+  }
+
+  private struct SessionFile {
+    var sessionID: String?
+    var parentSessionID: String?
+    var forkTimestamp: Date?
+    var snapshots: [Snapshot] = []
+  }
+
+  private struct TimestampParser {
+    private let standard = ISO8601DateFormatter()
+    private let fractional: ISO8601DateFormatter = {
+      let formatter = ISO8601DateFormatter()
+      formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+      return formatter
+    }()
+
+    func parse(_ value: String) -> Date? {
+      fractional.date(from: value) ?? standard.date(from: value)
+    }
+  }
+
+  static func build(sessionRoots: [URL], window: MonthWindow) throws -> [String: CodexLineage] {
+    var filesByPath: [String: SessionFile] = [:]
+    let timestampParser = TimestampParser()
+    for root in sessionRoots.map(\.standardizedFileURL) {
+      guard
+        let enumerator = FileManager.default.enumerator(
+          at: root,
+          includingPropertiesForKeys: [
+            .contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey,
+          ],
+          options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        )
+      else {
+        continue
+      }
+      while let file = enumerator.nextObject() as? URL {
+        try Task.checkCancellation()
+        guard
+          let values = try? file.resourceValues(forKeys: [
+            .contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey,
+          ]),
+          values.isSymbolicLink != true,
+          values.isRegularFile == true,
+          file.pathExtension == "jsonl",
+          let modified = values.contentModificationDate,
+          modified >= window.start
+        else {
+          continue
+        }
+        var session = SessionFile()
+        do {
+          try LocalLogScanner.scanFile(file: file, relativeTo: root) { data, _ in
+            guard
+              data.range(of: CodexLogScanner.sessionMetadataMarker) != nil
+                || data.range(of: CodexLogScanner.tokenCountMarker) != nil,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else {
+              return
+            }
+            if object["type"] as? String == "session_meta" {
+              observeMetadata(object, in: &session, timestampParser: timestampParser)
+            } else {
+              observeSnapshot(object, in: &session, timestampParser: timestampParser)
+            }
+          }
+          filesByPath[file.resolvingSymlinksInPath().path] = session
+        } catch is CancellationError {
+          throw CancellationError()
+        } catch {
+          continue
+        }
+      }
+    }
+
+    var sessionsByID: [String: SessionFile] = [:]
+    for path in filesByPath.keys.sorted() {
+      guard let file = filesByPath[path], let sessionID = file.sessionID else { continue }
+      sessionsByID[sessionID] = sessionsByID[sessionID] ?? file
+    }
+    return filesByPath.mapValues { file in
+      guard let parentID = file.parentSessionID else {
+        return CodexLineage(inheritedBaseline: nil, isUnresolvedFork: false)
+      }
+      guard let parent = sessionsByID[parentID] else {
+        return CodexLineage(inheritedBaseline: nil, isUnresolvedFork: true)
+      }
+      let eligible = parent.snapshots.filter { snapshot in
+        file.forkTimestamp.map { snapshot.timestamp <= $0 } ?? true
+      }
+      let baseline = eligible.reduce(nil as CodexTokenCounters?) { current, snapshot in
+        current?.componentwiseMaximum(with: snapshot.totals) ?? snapshot.totals
+      }
+      return CodexLineage(
+        inheritedBaseline: baseline,
+        isUnresolvedFork: baseline == nil
+      )
+    }
+  }
+
+  private static func observeMetadata(
+    _ object: [String: Any],
+    in session: inout SessionFile,
+    timestampParser: TimestampParser
+  ) {
+    let payload = object["payload"] as? [String: Any] ?? [:]
+    let metadataID =
+      identifier(in: payload, keys: ["session_id", "sessionId", "id"])
+      ?? identifier(in: object, keys: ["session_id", "sessionId", "id"])
+    if session.sessionID == nil {
+      session.sessionID = metadataID
+    }
+    guard metadataID == nil || metadataID == session.sessionID else { return }
+    session.parentSessionID =
+      session.parentSessionID
+      ?? parentSessionID(
+        payload: payload,
+        object: object
+      )
+    let timestamp = payload["timestamp"] as? String ?? object["timestamp"] as? String
+    session.forkTimestamp = session.forkTimestamp ?? timestamp.flatMap(timestampParser.parse)
+  }
+
+  private static func observeSnapshot(
+    _ object: [String: Any],
+    in session: inout SessionFile,
+    timestampParser: TimestampParser
+  ) {
+    guard
+      object["type"] as? String == "event_msg",
+      let timestamp = object["timestamp"] as? String,
+      let date = timestampParser.parse(timestamp),
+      let payload = object["payload"] as? [String: Any],
+      payload["type"] as? String == "token_count",
+      let info = payload["info"] as? [String: Any],
+      let totalsObject = info["total_token_usage"] as? [String: Any],
+      let totals = CodexTokenCounters(totalsObject)
+    else {
+      return
+    }
+    session.snapshots.append(Snapshot(timestamp: date, totals: totals))
+  }
+
+  private static func parentSessionID(
+    payload: [String: Any],
+    object: [String: Any]
+  ) -> String? {
+    let keys = ["forked_from_id", "forkedFromId", "parent_session_id", "parentSessionId"]
+    if let direct = identifier(
+      in: payload,
+      keys: keys
+    )
+      ?? identifier(
+        in: object,
+        keys: keys
+      )
+    {
+      return direct
+    }
+    guard
+      let source = payload["source"] as? [String: Any],
+      let subagent = source["subagent"] as? [String: Any],
+      let spawn = subagent["thread_spawn"] as? [String: Any]
+    else {
+      return nil
+    }
+    return identifier(in: spawn, keys: ["parent_thread_id", "parentThreadId"])
+  }
+
+  private static func identifier(in object: [String: Any], keys: [String]) -> String? {
+    guard
+      let value = string(in: object, keys: keys)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    else {
+      return nil
+    }
+    return value.isEmpty ? nil : value
   }
 }

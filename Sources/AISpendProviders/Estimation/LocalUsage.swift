@@ -85,8 +85,11 @@ struct LocalLogScanner {
     for file in try candidateFiles(window: window, diagnostics: &diagnostics) {
       try Task.checkCancellation()
       do {
-        var parserContext = LogParseContext(relativePath: relativePath(file.url, to: file.root))
-        try scan(file: file.url, relativeTo: file.root) { data, lineNumber in
+        var parserContext = LogParseContext(
+          relativePath: relativePath(file.url, to: file.root),
+          sourcePath: file.url.resolvingSymlinksInPath().path
+        )
+        try Self.scanFile(file: file.url, relativeTo: file.root) { data, lineNumber in
           parserContext.lineNumber = lineNumber
           guard data.isEmpty || candidateLine(data) else {
             return
@@ -231,7 +234,7 @@ struct LocalLogScanner {
     }
   }
 
-  private func scan(
+  static func scanFile(
     file: URL,
     relativeTo root: URL,
     process: (Data, Int) -> Void
@@ -336,13 +339,20 @@ struct LocalLogScanner {
 struct LogParseContext {
   var model: String?
   let relativePath: String
+  let sourcePath: String
   var lineNumber = 0
+  var codexUsageState: CodexUsageState?
   private let timestampFormatter = ISO8601DateFormatter()
   private let fractionalTimestampFormatter: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter
   }()
+
+  init(relativePath: String, sourcePath: String? = nil) {
+    self.relativePath = relativePath
+    self.sourcePath = sourcePath ?? relativePath
+  }
 
   func parseTimestamp(_ value: String) -> Date? {
     fractionalTimestampFormatter.date(from: value)
