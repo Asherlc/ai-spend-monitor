@@ -60,15 +60,13 @@ public struct CodexLogScanner: Sendable {
     onRetentionMetrics(build.retentionMetrics)
     try afterLineageScan()
     try Task.checkCancellation()
-    let currentCandidatePaths = try build.currentCandidatePaths()
     diagnostics.append(contentsOf: build.diagnostics)
     var usages: [LocalUsage] = []
     for candidate in build.candidates {
       try Task.checkCancellation()
       guard
         let lineage = build.lineage[candidate.sourcePath],
-        !lineage.suppressesUsage,
-        currentCandidatePaths.contains(candidate.sourcePath)
+        !lineage.suppressesUsage
       else {
         Self.appendSourceUnavailable(candidate.fileName, to: &diagnostics)
         continue
@@ -121,8 +119,6 @@ public struct CodexLogScanner: Sendable {
 
 struct CodexRetentionMetrics: Equatable, Sendable {
   let scannedFileCount: Int
-  let retainedFingerprintCount: Int
-  let materializedCandidateSnapshotCount: Int
 }
 
 private struct CodexLineageSnapshot: Sendable {
@@ -193,15 +189,6 @@ private struct CodexLineageBuild: Sendable {
   let candidates: [CodexRetainedCandidate]
   let diagnostics: [LocalLogDiagnostic]
   let retentionMetrics: CodexRetentionMetrics
-
-  func currentCandidatePaths() throws -> Set<String> {
-    var capturedCandidates: Set<String> = []
-    for candidate in candidates {
-      try Task.checkCancellation()
-      capturedCandidates.insert(candidate.sourcePath)
-    }
-    return capturedCandidates
-  }
 }
 
 struct CodexTokenCounters: Hashable, Sendable {
@@ -494,33 +481,8 @@ struct CodexUsageState {
   }
 }
 
-struct CodexFileFingerprint: Sendable {
-  let path: String
-  let size: Int
-  let modificationDate: Date
-
-  init?(file: URL) {
-    guard
-      let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
-      let size = values.fileSize,
-      let modificationDate = values.contentModificationDate
-    else {
-      return nil
-    }
-    path = file.resolvingSymlinksInPath().path
-    self.size = size
-    self.modificationDate = modificationDate
-  }
-
-  func isCurrent() -> Bool {
-    guard let current = Self(file: URL(fileURLWithPath: path)) else { return false }
-    return current.size == size && current.modificationDate == modificationDate
-  }
-}
-
 private enum CodexLineageIndex {
   private struct SessionFile {
-    let fingerprint: CodexFileFingerprint
     var sessionID: String?
     var parentSessionID: String?
     var hasObservedMetadata = false
@@ -534,7 +496,6 @@ private enum CodexLineageIndex {
 
   private struct DiscoveredFile {
     let file: LocalLogFile
-    let fingerprint: CodexFileFingerprint
     let sessionID: String?
   }
 
@@ -605,7 +566,7 @@ private enum CodexLineageIndex {
         let enumerator = FileManager.default.enumerator(
           at: root,
           includingPropertiesForKeys: [
-            .contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey,
+            .isRegularFileKey, .isSymbolicLinkKey,
           ],
           options: [.skipsHiddenFiles, .skipsPackageDescendants]
         )
@@ -624,13 +585,11 @@ private enum CodexLineageIndex {
         else {
           continue
         }
-        guard let fingerprint = CodexFileFingerprint(file: file) else { continue }
         let localFile = LocalLogFile(root: root, url: file.standardizedFileURL)
         let path = file.resolvingSymlinksInPath().path
         if discoveredByPath[path] == nil {
           discoveredByPath[path] = DiscoveredFile(
             file: localFile,
-            fingerprint: fingerprint,
             sessionID: discoverSessionID(in: localFile)
           )
         }
@@ -825,9 +784,7 @@ private enum CodexLineageIndex {
       candidates: candidates,
       diagnostics: diagnostics,
       retentionMetrics: CodexRetentionMetrics(
-        scannedFileCount: filesByPath.count,
-        retainedFingerprintCount: filesByPath.count,
-        materializedCandidateSnapshotCount: 0
+        scannedFileCount: filesByPath.count
       )
     )
   }
@@ -934,7 +891,7 @@ private enum CodexLineageIndex {
     onDeepScan: @Sendable (URL) -> Void,
     onDeepScanLine: @Sendable (Data, Int) -> Void
   ) throws -> DeepScanResult? {
-    var session = SessionFile(fingerprint: discovered.fingerprint)
+    var session = SessionFile()
     var currentModel: String?
     var retainedEvents: [CodexRetainedUsageEvent] = []
     var parsedTokenLines: [ParsedTokenLine] = []

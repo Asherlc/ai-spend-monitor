@@ -883,9 +883,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertEqual(
       retentionRecorder.metrics,
       CodexRetentionMetrics(
-        scannedFileCount: 3,
-        retainedFingerprintCount: 3,
-        materializedCandidateSnapshotCount: 0
+        scannedFileCount: 3
       )
     )
   }
@@ -933,7 +931,7 @@ final class CodexLogScannerTests: XCTestCase {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let file = root.appendingPathComponent("large-session.jsonl")
-    let irrelevant = Data(repeating: 0x78, count: 1_100_000)
+    let irrelevant = Data(repeating: 0x78, count: 1_200_000)
     let usage = Data(
       """
       {"timestamp":"2026-06-12T10:44:59.123Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}
@@ -951,15 +949,18 @@ final class CodexLogScannerTests: XCTestCase {
       containing: isoDate("2026-06-15T00:00:00Z"),
       calendar: calendar
     )
+    let lineRecorder = CodexDeepScanLineRecorder()
 
     let result = try CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
-      calendar: calendar
+      calendar: calendar,
+      onDeepScanLine: { _, lineNumber in lineRecorder.record(lineNumber) }
     ).scan(window: window, fetchedAt: window.end)
 
     XCTAssertEqual(result.records.count, 1)
     XCTAssertTrue(result.diagnostics.isEmpty)
+    XCTAssertEqual(lineRecorder.lineNumbers, [2, 3])
   }
 
   func testSinglePassPreservesCandidateMalformedLineDiagnostics() throws {
@@ -1151,6 +1152,8 @@ private final class CodexDeepScanRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private var recordedFileNames: [String] = []
 
+  deinit {}
+
   var fileNames: [String] {
     lock.withLock { recordedFileNames }
   }
@@ -1168,6 +1171,8 @@ private final class CodexDeepScanLineRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private var recordedLineNumbers: [Int] = []
 
+  deinit {}
+
   var lineNumbers: [Int] {
     lock.withLock { recordedLineNumbers }
   }
@@ -1180,6 +1185,8 @@ private final class CodexDeepScanLineRecorder: @unchecked Sendable {
 private final class CodexRetentionMetricsRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private var recordedMetrics: CodexRetentionMetrics?
+
+  deinit {}
 
   var metrics: CodexRetentionMetrics? {
     lock.withLock { recordedMetrics }

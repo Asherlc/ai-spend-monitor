@@ -357,7 +357,9 @@ struct LocalLogScanner {
       if chunk.isEmpty {
         if discardingOversizedLine {
           lineNumber += 1
-          process(Data(), lineNumber)
+          if markerBytes == nil {
+            process(Data(), lineNumber)
+          }
           try Task.checkCancellation()
         } else if !buffer.isEmpty {
           lineNumber += 1
@@ -378,7 +380,9 @@ struct LocalLogScanner {
         let line = buffer[lineStart..<newline]
         if discardingOversizedLine {
           discardingOversizedLine = false
-          process(Data(), lineNumber)
+          if markerBytes == nil {
+            process(Data(), lineNumber)
+          }
           try Task.checkCancellation()
         } else if shouldProcess(line, markerBytes: markerBytes) {
           process(Data(line), lineNumber)
