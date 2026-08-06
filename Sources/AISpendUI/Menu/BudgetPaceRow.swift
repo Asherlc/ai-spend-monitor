@@ -22,10 +22,19 @@ public struct BudgetPaceRow: View {
             .foregroundStyle(.secondary)
         }
         Spacer()
-        if let margin = evaluation.projectedMargin {
-          Text(marginText(margin))
-            .font(.caption.monospacedDigit())
-            .foregroundStyle(margin.amount >= 0 ? .secondary : color)
+        if let currentMargin = evaluation.currentMargin,
+          let projectedMargin = evaluation.projectedMargin,
+          let forecast = evaluation.exhaustionForecast
+        {
+          Text(
+            SpendFormatting.budgetMargin(
+              currentMargin: currentMargin,
+              forecast: forecast,
+              projectedMargin: projectedMargin
+            )
+          )
+          .font(.caption.monospacedDigit())
+          .foregroundStyle(projectedMargin.amount >= 0 ? .secondary : color)
         }
       }
       if let usageFraction = evaluation.usageFraction {
@@ -68,12 +77,5 @@ public struct BudgetPaceRow: View {
     case .offPace: .orange
     case .collecting, .unknown: .secondary
     }
-  }
-
-  private func marginText(_ margin: Money) -> String {
-    if margin.amount >= 0 {
-      return "\(SpendFormatting.currency(margin)) under"
-    }
-    return "\(SpendFormatting.currency(Money(-margin.amount))) over"
   }
 }

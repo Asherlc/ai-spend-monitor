@@ -169,10 +169,17 @@ private struct BudgetEditorRow: View {
       SpendFormatting.budgetForecast($0)
     }
     let detail = [state, forecast].compactMap { $0 }.joined(separator: " · ")
-    guard let margin = evaluation.projectedMargin else { return detail }
-    let direction = margin.amount >= 0 ? "under" : "over"
-    let amount = Money(abs(margin.amount))
-    return "\(detail) · \(SpendFormatting.currency(amount)) \(direction)"
+    guard
+      let currentMargin = evaluation.currentMargin,
+      let projectedMargin = evaluation.projectedMargin,
+      let forecast = evaluation.exhaustionForecast
+    else { return detail }
+    let margin = SpendFormatting.budgetMargin(
+      currentMargin: currentMargin,
+      forecast: forecast,
+      projectedMargin: projectedMargin
+    )
+    return "\(detail) · \(margin)"
   }
 
   private var progressColor: Color {

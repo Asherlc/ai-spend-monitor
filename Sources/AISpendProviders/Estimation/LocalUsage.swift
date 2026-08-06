@@ -131,13 +131,43 @@ struct LocalLogScanner {
             return
           }
           let key = BilledUsageKey(eventID: usage.eventID, model: usage.model)
-          usageByID[key] = merge(usageByID[key], with: usage)
+          usageByID[key] = Self.merge(usageByID[key], with: usage)
         }
       } catch is CancellationError {
         throw CancellationError()
       } catch {
         diagnostics.append(.sourceUnavailable(file: file.url.lastPathComponent))
       }
+    }
+
+    return try Self.scan(
+      provider: provider,
+      priceCatalog: priceCatalog,
+      calendar: calendar,
+      window: window,
+      fetchedAt: fetchedAt,
+      usages: Array(usageByID.values),
+      initialDiagnostics: diagnostics
+    )
+  }
+
+  static func scan(
+    provider: ProviderID,
+    priceCatalog: PriceCatalog,
+    calendar: Calendar,
+    window: MonthWindow,
+    fetchedAt: Date,
+    usages: [LocalUsage],
+    initialDiagnostics: [LocalLogDiagnostic]
+  ) throws -> LocalLogScanResult {
+    try Task.checkCancellation()
+    var diagnostics = initialDiagnostics
+    var usageByID: [BilledUsageKey: LocalUsage] = [:]
+    for usage in usages {
+      try Task.checkCancellation()
+      guard window.contains(usage.timestamp) else { continue }
+      let key = BilledUsageKey(eventID: usage.eventID, model: usage.model)
+      usageByID[key] = merge(usageByID[key], with: usage)
     }
 
     let groups = Dictionary(grouping: usageByID.values) { usage in
@@ -148,15 +178,31 @@ struct LocalLogScanner {
     }
     var records: [SpendRecord] = []
     for (day, usages) in groups.sorted(by: { $0.key < $1.key }) {
+      try Task.checkCancellation()
+      var eventIDs: [String] = []
+      var inputTokens = 0
+      var cacheCreation5mInputTokens = 0
+      var cacheCreation1hInputTokens = 0
+      var cachedInputTokens = 0
+      var outputTokens = 0
+      for usage in usages {
+        try Task.checkCancellation()
+        eventIDs.append(usage.eventID)
+        inputTokens += usage.inputTokens
+        cacheCreation5mInputTokens += usage.cacheCreation5mInputTokens
+        cacheCreation1hInputTokens += usage.cacheCreation1hInputTokens
+        cachedInputTokens += usage.cachedInputTokens
+        outputTokens += usage.outputTokens
+      }
       let aggregate = LocalUsage(
-        eventID: usages.map(\.eventID).sorted().joined(separator: ","),
+        eventID: eventIDs.sorted().joined(separator: ","),
         timestamp: day.start,
         model: day.model,
-        inputTokens: usages.reduce(0) { $0 + $1.inputTokens },
-        cacheCreation5mInputTokens: usages.reduce(0) { $0 + $1.cacheCreation5mInputTokens },
-        cacheCreation1hInputTokens: usages.reduce(0) { $0 + $1.cacheCreation1hInputTokens },
-        cachedInputTokens: usages.reduce(0) { $0 + $1.cachedInputTokens },
-        outputTokens: usages.reduce(0) { $0 + $1.outputTokens }
+        inputTokens: inputTokens,
+        cacheCreation5mInputTokens: cacheCreation5mInputTokens,
+        cacheCreation1hInputTokens: cacheCreation1hInputTokens,
+        cachedInputTokens: cachedInputTokens,
+        outputTokens: outputTokens
       )
       let amount: Money
       do {
@@ -172,7 +218,7 @@ struct LocalLogScanner {
         provider: provider,
         model: day.model,
         day: day.start,
-        eventIDs: usages.map(\.eventID)
+        eventIDs: eventIDs
       )
       records.append(
         try SpendRecord(
@@ -261,6 +307,34 @@ struct LocalLogScanner {
     relativeTo root: URL,
     process: (Data, Int) -> Void
   ) throws {
+    try scanFileImpl(
+      file: file,
+      relativeTo: root,
+      markerBytes: nil,
+      process: process
+    )
+  }
+
+  static func scanFile(
+    file: URL,
+    relativeTo root: URL,
+    markerBytes: [Data],
+    process: (Data, Int) -> Void
+  ) throws {
+    try scanFileImpl(
+      file: file,
+      relativeTo: root,
+      markerBytes: markerBytes,
+      process: process
+    )
+  }
+
+  private static func scanFileImpl(
+    file: URL,
+    relativeTo root: URL,
+    markerBytes: [Data]?,
+    process: (Data, Int) -> Void
+  ) throws {
     let rootComponents = root.standardizedFileURL.pathComponents
     let fileComponents = file.standardizedFileURL.pathComponents
     guard fileComponents.starts(with: rootComponents) else {
@@ -283,10 +357,16 @@ struct LocalLogScanner {
       if chunk.isEmpty {
         if discardingOversizedLine {
           lineNumber += 1
-          process(Data(), lineNumber)
+          if markerBytes == nil {
+            process(Data(), lineNumber)
+          }
+          try Task.checkCancellation()
         } else if !buffer.isEmpty {
           lineNumber += 1
-          process(buffer, lineNumber)
+          if shouldProcess(buffer, markerBytes: markerBytes) {
+            process(buffer, lineNumber)
+            try Task.checkCancellation()
+          }
         }
         break
       }
@@ -295,13 +375,18 @@ struct LocalLogScanner {
       while lineStart < buffer.endIndex,
         let newline = buffer[lineStart...].firstIndex(of: 0x0A)
       {
+        try Task.checkCancellation()
         lineNumber += 1
         let line = buffer[lineStart..<newline]
         if discardingOversizedLine {
           discardingOversizedLine = false
-          process(Data(), lineNumber)
-        } else if !line.isEmpty {
+          if markerBytes == nil {
+            process(Data(), lineNumber)
+          }
+          try Task.checkCancellation()
+        } else if shouldProcess(line, markerBytes: markerBytes) {
           process(Data(line), lineNumber)
+          try Task.checkCancellation()
         }
         lineStart = buffer.index(after: newline)
       }
@@ -313,6 +398,12 @@ struct LocalLogScanner {
         buffer.removeAll(keepingCapacity: true)
       }
     }
+  }
+
+  private static func shouldProcess(_ line: Data, markerBytes: [Data]?) -> Bool {
+    guard !line.isEmpty else { return false }
+    guard let markerBytes else { return true }
+    return markerBytes.contains { line.range(of: $0) != nil }
   }
 
   static func readFilePrefix(
@@ -347,7 +438,7 @@ struct LocalLogScanner {
     return digest.map { String(format: "%02x", $0) }.joined()
   }
 
-  private func merge(_ existing: LocalUsage?, with incoming: LocalUsage) -> LocalUsage {
+  private static func merge(_ existing: LocalUsage?, with incoming: LocalUsage) -> LocalUsage {
     guard let existing else {
       return incoming
     }

@@ -63,4 +63,16 @@ public enum SpendFormatting {
       return "Projected to reach \(formatter.string(from: date))"
     }
   }
+
+  static func budgetMargin(
+    currentMargin: Money,
+    forecast: BudgetExhaustionForecast,
+    projectedMargin: Money
+  ) -> String {
+    if forecast == .reached {
+      return "\(currency(Money(abs(currentMargin.amount)))) over now"
+    }
+    let direction = projectedMargin.amount >= 0 ? "under" : "over"
+    return "\(currency(Money(abs(projectedMargin.amount)))) projected \(direction)"
+  }
 }
