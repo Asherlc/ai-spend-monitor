@@ -241,7 +241,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testLineageDeepScansOnlyCandidateAndReachableHistoricalParent() throws {
+  func testFullScansEachCandidateAndReachableHistoricalParentOnlyOnce() throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let parent = root.appendingPathComponent("old-parent.jsonl")
@@ -282,11 +282,13 @@ final class CodexLogScannerTests: XCTestCase {
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar,
-      onLineageDeepScan: { recorder.record($0.lastPathComponent) }
+      onFullFileScan: { recorder.record($0.lastPathComponent) }
     ).scan(window: window, fetchedAt: window.end)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
-    XCTAssertEqual(Set(recorder.fileNames), ["child.jsonl", "old-parent.jsonl"])
+    XCTAssertEqual(recorder.count(for: "child.jsonl"), 1)
+    XCTAssertEqual(recorder.count(for: "old-parent.jsonl"), 1)
+    XCTAssertEqual(recorder.count(for: "unrelated-old.jsonl"), 0)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
@@ -534,6 +536,17 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
+  func testSinglePassPreservesCandidateMalformedLineDiagnostics() throws {
+    let result = try scanCodexLines([
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"type":"event_msg","payload":{"type":"token_count""#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ])
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 100)
+    XCTAssertEqual(result.diagnostics, [.malformedLine(file: "session.jsonl", line: 2)])
+  }
+
   func testScansStreamsDeduplicatesAndAggregatesOneRecordPerModelDay() throws {
     let root = try fixtureRoot(named: "codex-session")
     defer { try? FileManager.default.removeItem(at: root) }
@@ -714,6 +727,10 @@ private final class CodexDeepScanRecorder: @unchecked Sendable {
 
   func record(_ fileName: String) {
     lock.withLock { recordedFileNames.append(fileName) }
+  }
+
+  func count(for fileName: String) -> Int {
+    lock.withLock { recordedFileNames.count { $0 == fileName } }
   }
 }
 

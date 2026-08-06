@@ -59,6 +59,7 @@ struct LocalLogScanner {
   let priceCatalog: PriceCatalog
   let calendar: Calendar
   let candidateLine: CandidateLine
+  let onFileScan: @Sendable (URL) -> Void
   let parser: UsageParser
 
   init(
@@ -67,6 +68,7 @@ struct LocalLogScanner {
     priceCatalog: PriceCatalog,
     calendar: Calendar,
     candidateLine: @escaping CandidateLine = { _ in true },
+    onFileScan: @escaping @Sendable (URL) -> Void = { _ in },
     parser: @escaping UsageParser
   ) {
     self.provider = provider
@@ -74,6 +76,7 @@ struct LocalLogScanner {
     self.priceCatalog = priceCatalog
     self.calendar = calendar
     self.candidateLine = candidateLine
+    self.onFileScan = onFileScan
     self.parser = parser
   }
 
@@ -106,6 +109,7 @@ struct LocalLogScanner {
     for file in files {
       try Task.checkCancellation()
       do {
+        onFileScan(file.url)
         var parserContext = LogParseContext(
           relativePath: relativePath(file.url, to: file.root),
           sourcePath: file.url.resolvingSymlinksInPath().path
@@ -131,13 +135,43 @@ struct LocalLogScanner {
             return
           }
           let key = BilledUsageKey(eventID: usage.eventID, model: usage.model)
-          usageByID[key] = merge(usageByID[key], with: usage)
+          usageByID[key] = Self.merge(usageByID[key], with: usage)
         }
       } catch is CancellationError {
         throw CancellationError()
       } catch {
         diagnostics.append(.sourceUnavailable(file: file.url.lastPathComponent))
       }
+    }
+
+    return try Self.scan(
+      provider: provider,
+      priceCatalog: priceCatalog,
+      calendar: calendar,
+      window: window,
+      fetchedAt: fetchedAt,
+      usages: Array(usageByID.values),
+      initialDiagnostics: diagnostics
+    )
+  }
+
+  static func scan(
+    provider: ProviderID,
+    priceCatalog: PriceCatalog,
+    calendar: Calendar,
+    window: MonthWindow,
+    fetchedAt: Date,
+    usages: [LocalUsage],
+    initialDiagnostics: [LocalLogDiagnostic]
+  ) throws -> LocalLogScanResult {
+    try Task.checkCancellation()
+    var diagnostics = initialDiagnostics
+    var usageByID: [BilledUsageKey: LocalUsage] = [:]
+    for usage in usages {
+      try Task.checkCancellation()
+      guard window.contains(usage.timestamp) else { continue }
+      let key = BilledUsageKey(eventID: usage.eventID, model: usage.model)
+      usageByID[key] = merge(usageByID[key], with: usage)
     }
 
     let groups = Dictionary(grouping: usageByID.values) { usage in
@@ -148,15 +182,31 @@ struct LocalLogScanner {
     }
     var records: [SpendRecord] = []
     for (day, usages) in groups.sorted(by: { $0.key < $1.key }) {
+      try Task.checkCancellation()
+      var eventIDs: [String] = []
+      var inputTokens = 0
+      var cacheCreation5mInputTokens = 0
+      var cacheCreation1hInputTokens = 0
+      var cachedInputTokens = 0
+      var outputTokens = 0
+      for usage in usages {
+        try Task.checkCancellation()
+        eventIDs.append(usage.eventID)
+        inputTokens += usage.inputTokens
+        cacheCreation5mInputTokens += usage.cacheCreation5mInputTokens
+        cacheCreation1hInputTokens += usage.cacheCreation1hInputTokens
+        cachedInputTokens += usage.cachedInputTokens
+        outputTokens += usage.outputTokens
+      }
       let aggregate = LocalUsage(
-        eventID: usages.map(\.eventID).sorted().joined(separator: ","),
+        eventID: eventIDs.sorted().joined(separator: ","),
         timestamp: day.start,
         model: day.model,
-        inputTokens: usages.reduce(0) { $0 + $1.inputTokens },
-        cacheCreation5mInputTokens: usages.reduce(0) { $0 + $1.cacheCreation5mInputTokens },
-        cacheCreation1hInputTokens: usages.reduce(0) { $0 + $1.cacheCreation1hInputTokens },
-        cachedInputTokens: usages.reduce(0) { $0 + $1.cachedInputTokens },
-        outputTokens: usages.reduce(0) { $0 + $1.outputTokens }
+        inputTokens: inputTokens,
+        cacheCreation5mInputTokens: cacheCreation5mInputTokens,
+        cacheCreation1hInputTokens: cacheCreation1hInputTokens,
+        cachedInputTokens: cachedInputTokens,
+        outputTokens: outputTokens
       )
       let amount: Money
       do {
@@ -172,7 +222,7 @@ struct LocalLogScanner {
         provider: provider,
         model: day.model,
         day: day.start,
-        eventIDs: usages.map(\.eventID)
+        eventIDs: eventIDs
       )
       records.append(
         try SpendRecord(
@@ -347,7 +397,7 @@ struct LocalLogScanner {
     return digest.map { String(format: "%02x", $0) }.joined()
   }
 
-  private func merge(_ existing: LocalUsage?, with incoming: LocalUsage) -> LocalUsage {
+  private static func merge(_ existing: LocalUsage?, with incoming: LocalUsage) -> LocalUsage {
     guard let existing else {
       return incoming
     }

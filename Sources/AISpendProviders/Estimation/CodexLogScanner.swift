@@ -7,7 +7,7 @@ public struct CodexLogScanner: Sendable {
   private let calendar: Calendar
   private let beforeLineageScan: @Sendable () throws -> Void
   private let afterLineageScan: @Sendable () throws -> Void
-  private let onLineageDeepScan: @Sendable (URL) -> Void
+  private let onFullFileScan: @Sendable (URL) -> Void
 
   public init(
     priceCatalog: PriceCatalog,
@@ -27,14 +27,14 @@ public struct CodexLogScanner: Sendable {
     calendar: Calendar,
     beforeLineageScan: @escaping @Sendable () throws -> Void = {},
     afterLineageScan: @escaping @Sendable () throws -> Void = {},
-    onLineageDeepScan: @escaping @Sendable (URL) -> Void = { _ in }
+    onFullFileScan: @escaping @Sendable (URL) -> Void = { _ in }
   ) {
     self.sessionRoots = sessionRoots
     self.priceCatalog = priceCatalog
     self.calendar = calendar
     self.beforeLineageScan = beforeLineageScan
     self.afterLineageScan = afterLineageScan
-    self.onLineageDeepScan = onLineageDeepScan
+    self.onFullFileScan = onFullFileScan
   }
 
   public func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
@@ -45,98 +45,89 @@ public struct CodexLogScanner: Sendable {
       diagnostics: &diagnostics
     )
     try beforeLineageScan()
-    let lineage = try CodexLineageIndex.build(
+    let build = try CodexLineageIndex.build(
       sessionRoots: sessionRoots,
       candidateFiles: files,
-      onDeepScan: onLineageDeepScan
+      onDeepScan: onFullFileScan
     )
     try afterLineageScan()
-    let result = try LocalLogScanner(
+    try Task.checkCancellation()
+    diagnostics.append(contentsOf: build.diagnostics)
+    var usages: [LocalUsage] = []
+    for candidate in build.candidates {
+      try Task.checkCancellation()
+      guard
+        let lineage = build.lineage[candidate.sourcePath],
+        !lineage.suppressesUsage
+      else {
+        Self.appendSourceUnavailable(candidate.fileName, to: &diagnostics)
+        continue
+      }
+      var usageState = CodexUsageState(lineage: lineage)
+      for event in candidate.events {
+        try Task.checkCancellation()
+        if let usage = event.replay(
+          relativePath: candidate.relativePath,
+          usageState: &usageState
+        ) {
+          usages.append(usage)
+        }
+      }
+    }
+    let retainedPaths = Set(build.candidates.map(\.sourcePath))
+    for file in files {
+      try Task.checkCancellation()
+      let path = file.url.resolvingSymlinksInPath().path
+      if !retainedPaths.contains(path), build.lineage[path]?.suppressesUsage == true {
+        Self.appendSourceUnavailable(file.url.lastPathComponent, to: &diagnostics)
+      }
+    }
+    return try LocalLogScanner.scan(
       provider: .openAI,
-      sessionRoots: sessionRoots,
       priceCatalog: priceCatalog,
       calendar: calendar,
-      candidateLine: {
-        $0.range(of: Self.turnContextMarker) != nil
-          || $0.range(of: Self.tokenCountMarker) != nil
-          || $0.range(of: Self.sessionMetadataMarker) != nil
-      },
-      parser: { object, context in
-        Self.parse(object, context: &context, lineage: lineage[context.sourcePath])
-      }
-    ).scan(
       window: window,
       fetchedAt: fetchedAt,
-      files: files,
+      usages: usages,
       initialDiagnostics: diagnostics
-    )
-    let suppressedDiagnostics = files.compactMap { file -> LocalLogDiagnostic? in
-      let path = file.url.resolvingSymlinksInPath().path
-      guard lineage[path]?.suppressesUsage == true else { return nil }
-      return .sourceUnavailable(file: file.url.lastPathComponent)
-    }
-    var combinedDiagnostics = result.diagnostics
-    for diagnostic in suppressedDiagnostics where !combinedDiagnostics.contains(diagnostic) {
-      combinedDiagnostics.append(diagnostic)
-    }
-    return LocalLogScanResult(
-      records: result.records,
-      diagnostics: combinedDiagnostics.sorted {
-        String(describing: $0) < String(describing: $1)
-      }
     )
   }
 
-  private static let turnContextMarker = Data(#""turn_context""#.utf8)
+  fileprivate static let turnContextMarker = Data(#""turn_context""#.utf8)
   fileprivate static let tokenCountMarker = Data(#""token_count""#.utf8)
   fileprivate static let sessionMetadataMarker = Data(#""session_meta""#.utf8)
 
-  private static func parse(
-    _ object: [String: Any],
-    context: inout LogParseContext,
-    lineage: CodexLineage?
+  private static func appendSourceUnavailable(
+    _ fileName: String,
+    to diagnostics: inout [LocalLogDiagnostic]
+  ) {
+    let diagnostic = LocalLogDiagnostic.sourceUnavailable(file: fileName)
+    if !diagnostics.contains(diagnostic) {
+      diagnostics.append(diagnostic)
+    }
+  }
+}
+
+private struct CodexRetainedUsageEvent: Sendable {
+  let timestampValue: String
+  let timestamp: Date
+  let model: String
+  let total: CodexTokenCounters?
+  let last: CodexTokenCounters?
+  let explicitEventID: String?
+  let lineNumber: Int
+
+  func replay(
+    relativePath: String,
+    usageState: inout CodexUsageState
   ) -> LocalUsage? {
-    if object["type"] as? String == "turn_context",
-      let payload = object["payload"] as? [String: Any],
-      let model = payload["model"] as? String
-    {
-      context.model = model
-      return nil
-    }
-    guard
-      object["type"] as? String == "event_msg",
-      let timestampValue = object["timestamp"] as? String,
-      let timestamp = context.parseTimestamp(timestampValue),
-      let payload = object["payload"] as? [String: Any],
-      payload["type"] as? String == "token_count",
-      let model = payload["model"] as? String ?? context.model,
-      let info = payload["info"] as? [String: Any]
-    else {
-      return nil
-    }
-    let totalObject = info["total_token_usage"] as? [String: Any]
-    let lastObject = info["last_token_usage"] as? [String: Any]
-    let total = totalObject.flatMap(CodexTokenCounters.init)
-    let last = lastObject.flatMap(CodexTokenCounters.init)
-    guard
-      totalObject == nil || total != nil,
-      lastObject == nil || last != nil,
-      total != nil || last != nil
-    else {
-      return nil
-    }
-    if context.codexUsageState == nil {
-      context.codexUsageState = CodexUsageState(lineage: lineage)
-    }
-    guard let delta = context.codexUsageState?.consume(total: total, last: last), !delta.isZero
-    else {
+    guard let delta = usageState.consume(total: total, last: last), !delta.isZero else {
       return nil
     }
     let eventID =
-      string(in: object, keys: ["event_id", "id"])
-      ?? string(in: payload, keys: ["event_id", "id"])
+      explicitEventID
       ?? [
-        "position:\(context.relativePath):\(context.lineNumber)",
+        "position:\(relativePath):\(lineNumber)",
         "timestamp:\(timestampValue)",
         "model:\(model)",
         "tokens:\(delta.input):\(delta.cached):\(delta.output)",
@@ -150,6 +141,19 @@ public struct CodexLogScanner: Sendable {
       outputTokens: delta.output
     )
   }
+}
+
+private struct CodexRetainedCandidate: Sendable {
+  let fileName: String
+  let relativePath: String
+  let sourcePath: String
+  let events: [CodexRetainedUsageEvent]
+}
+
+private struct CodexLineageBuild: Sendable {
+  let lineage: [String: CodexLineage]
+  let candidates: [CodexRetainedCandidate]
+  let diagnostics: [LocalLogDiagnostic]
 }
 
 struct CodexTokenCounters: Hashable, Sendable {
@@ -329,12 +333,19 @@ private enum CodexLineageIndex {
     var forkTimestamp: Date?
     var snapshots: [Snapshot] = []
     var usageState = CodexUsageState(lineage: nil)
+    var sourceUnavailable = false
   }
 
   private struct DiscoveredFile {
     let file: LocalLogFile
     let fingerprint: CodexFileFingerprint
     let sessionID: String?
+  }
+
+  private struct DeepScanResult {
+    let session: SessionFile
+    let retainedEvents: [CodexRetainedUsageEvent]
+    let diagnostics: [LocalLogDiagnostic]
   }
 
   private struct TimestampParser {
@@ -354,7 +365,7 @@ private enum CodexLineageIndex {
     sessionRoots: [URL],
     candidateFiles: [LocalLogFile],
     onDeepScan: @Sendable (URL) -> Void
-  ) throws -> [String: CodexLineage] {
+  ) throws -> CodexLineageBuild {
     let timestampParser = TimestampParser()
     var discoveredByPath: [String: DiscoveredFile] = [:]
     for root in sessionRoots.map(\.standardizedFileURL) {
@@ -401,16 +412,27 @@ private enum CodexLineageIndex {
     }
 
     var filesByPath: [String: SessionFile] = [:]
+    var retainedCandidatesByPath: [String: CodexRetainedCandidate] = [:]
+    var diagnostics: [LocalLogDiagnostic] = []
     for candidate in candidateFiles {
+      try Task.checkCancellation()
       let path = candidate.url.resolvingSymlinksInPath().path
       guard let discovered = discoveredByPath[path] else { continue }
-      if let session = try deepScan(
+      if let result = try deepScan(
         discovered,
         timestampParser: timestampParser,
+        retainCandidateEvents: true,
         onDeepScan: onDeepScan
       ) {
-        filesByPath[path] = session
-        if let sessionID = session.sessionID {
+        filesByPath[path] = result.session
+        retainedCandidatesByPath[path] = CodexRetainedCandidate(
+          fileName: candidate.url.lastPathComponent,
+          relativePath: relativePath(candidate.url, to: candidate.root),
+          sourcePath: path,
+          events: result.retainedEvents
+        )
+        diagnostics.append(contentsOf: result.diagnostics)
+        if let sessionID = result.session.sessionID {
           discoveredPathsBySessionID[sessionID, default: []].insert(path)
         }
       }
@@ -434,14 +456,16 @@ private enum CodexLineageIndex {
         continue
       }
       guard
-        let session = try deepScan(
+        let result = try deepScan(
           discovered,
           timestampParser: timestampParser,
+          retainCandidateEvents: false,
           onDeepScan: onDeepScan
         )
       else {
         continue
       }
+      let session = result.session
       filesByPath[path] = session
       if let sessionID = session.sessionID {
         discoveredPathsBySessionID[sessionID, default: []].insert(path)
@@ -457,7 +481,7 @@ private enum CodexLineageIndex {
       sessionsByID[sessionID] = sessionsByID[sessionID] ?? file
     }
     var lineageByPath = filesByPath.mapValues { file in
-      guard !file.usageState.hasFailed else {
+      guard !file.sourceUnavailable, !file.usageState.hasFailed else {
         return CodexLineage(
           inheritedBaseline: nil,
           isUnresolvedFork: true,
@@ -480,7 +504,7 @@ private enum CodexLineageIndex {
           fingerprints: [file.fingerprint]
         )
       }
-      guard !parent.usageState.hasFailed else {
+      guard !parent.sourceUnavailable, !parent.usageState.hasFailed else {
         return CodexLineage(
           inheritedBaseline: nil,
           isUnresolvedFork: true,
@@ -538,7 +562,14 @@ private enum CodexLineageIndex {
         )
       }
     }
-    return lineageByPath
+    let candidates = candidateFiles.compactMap { candidate in
+      retainedCandidatesByPath[candidate.url.resolvingSymlinksInPath().path]
+    }
+    return CodexLineageBuild(
+      lineage: lineageByPath,
+      candidates: candidates,
+      diagnostics: diagnostics
+    )
   }
 
   private static func discoverSessionID(in file: LocalLogFile) -> String? {
@@ -570,34 +601,126 @@ private enum CodexLineageIndex {
   private static func deepScan(
     _ discovered: DiscoveredFile,
     timestampParser: TimestampParser,
+    retainCandidateEvents: Bool,
     onDeepScan: @Sendable (URL) -> Void
-  ) throws -> SessionFile? {
+  ) throws -> DeepScanResult? {
     var session = SessionFile(fingerprint: discovered.fingerprint)
+    var currentModel: String?
+    var retainedEvents: [CodexRetainedUsageEvent] = []
+    var diagnostics: [LocalLogDiagnostic] = []
     do {
       onDeepScan(discovered.file.url)
       try LocalLogScanner.scanFile(
         file: discovered.file.url,
         relativeTo: discovered.file.root
-      ) { data, _ in
-        guard
+      ) { data, lineNumber in
+        let containsTurnContext =
+          data.range(of: CodexLogScanner.turnContextMarker) != nil
+        let containsTokenCount =
+          data.range(of: CodexLogScanner.tokenCountMarker) != nil
+        let containsSessionMetadata =
           data.range(of: CodexLogScanner.sessionMetadataMarker) != nil
-            || data.range(of: CodexLogScanner.tokenCountMarker) != nil,
-          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        let isCandidateLine =
+          data.isEmpty || containsTurnContext || containsTokenCount || containsSessionMetadata
+        guard
+          containsTokenCount || containsSessionMetadata
+            || (retainCandidateEvents && isCandidateLine)
         else {
           return
         }
-        if object["type"] as? String == "session_meta" {
-          observeMetadata(object, in: &session, timestampParser: timestampParser)
+        guard
+          let object = try? JSONSerialization.jsonObject(with: data),
+          let dictionary = object as? [String: Any]
+        else {
+          if retainCandidateEvents && isCandidateLine {
+            diagnostics.append(
+              .malformedLine(file: discovered.file.url.lastPathComponent, line: lineNumber)
+            )
+          }
+          return
+        }
+        if dictionary["type"] as? String == "session_meta" {
+          observeMetadata(dictionary, in: &session, timestampParser: timestampParser)
         } else {
-          observeSnapshot(object, in: &session, timestampParser: timestampParser)
+          observeSnapshot(dictionary, in: &session, timestampParser: timestampParser)
+        }
+        guard retainCandidateEvents else { return }
+        if dictionary["type"] as? String == "turn_context",
+          let payload = dictionary["payload"] as? [String: Any],
+          let model = payload["model"] as? String
+        {
+          currentModel = model
+        } else if let event = retainedUsageEvent(
+          dictionary,
+          currentModel: currentModel,
+          lineNumber: lineNumber,
+          timestampParser: timestampParser
+        ) {
+          retainedEvents.append(event)
         }
       }
-      return session
+      return DeepScanResult(
+        session: session,
+        retainedEvents: retainedEvents,
+        diagnostics: diagnostics
+      )
     } catch is CancellationError {
       throw CancellationError()
     } catch {
+      session.sourceUnavailable = true
+      return DeepScanResult(
+        session: session,
+        retainedEvents: retainedEvents,
+        diagnostics: diagnostics
+      )
+    }
+  }
+
+  private static func retainedUsageEvent(
+    _ object: [String: Any],
+    currentModel: String?,
+    lineNumber: Int,
+    timestampParser: TimestampParser
+  ) -> CodexRetainedUsageEvent? {
+    guard
+      object["type"] as? String == "event_msg",
+      let timestampValue = object["timestamp"] as? String,
+      let timestamp = timestampParser.parse(timestampValue),
+      let payload = object["payload"] as? [String: Any],
+      payload["type"] as? String == "token_count",
+      let model = payload["model"] as? String ?? currentModel,
+      let info = payload["info"] as? [String: Any]
+    else {
       return nil
     }
+    let totalObject = info["total_token_usage"] as? [String: Any]
+    let lastObject = info["last_token_usage"] as? [String: Any]
+    let total = totalObject.flatMap(CodexTokenCounters.init)
+    let last = lastObject.flatMap(CodexTokenCounters.init)
+    guard
+      totalObject == nil || total != nil,
+      lastObject == nil || last != nil,
+      total != nil || last != nil
+    else {
+      return nil
+    }
+    return CodexRetainedUsageEvent(
+      timestampValue: timestampValue,
+      timestamp: timestamp,
+      model: model,
+      total: total,
+      last: last,
+      explicitEventID: string(in: object, keys: ["event_id", "id"])
+        ?? string(in: payload, keys: ["event_id", "id"]),
+      lineNumber: lineNumber
+    )
+  }
+
+  private static func relativePath(_ file: URL, to root: URL) -> String {
+    let rootComponents = root.standardizedFileURL.pathComponents
+    return file.standardizedFileURL.pathComponents
+      .dropFirst(rootComponents.count)
+      .joined(separator: "/")
   }
 
   private static func observeMetadata(
