@@ -1,7 +1,8 @@
 import AISpendCore
-import AISpendUI
 import Foundation
 import XCTest
+
+@testable import AISpendUI
 
 final class SpendFormattingTests: XCTestCase {
   func testMenuBarFormatsUSDWithTwoFractionDigits() {
@@ -50,6 +51,28 @@ final class SpendFormattingTests: XCTestCase {
     XCTAssertEqual(
       SpendFormatting.budgetForecast(.lastsThroughMonth),
       "Lasts through month"
+    )
+  }
+
+  func testReachedBudgetMarginUsesCurrentOverage() {
+    XCTAssertEqual(
+      SpendFormatting.budgetMargin(
+        currentMargin: Money(Decimal(string: "-625.90")!),
+        forecast: .reached,
+        projectedMargin: Money(Decimal(string: "-5687.46")!)
+      ),
+      "$625.90 over now"
+    )
+  }
+
+  func testUnreachedBudgetMarginIdentifiesProjectedOverage() {
+    XCTAssertEqual(
+      SpendFormatting.budgetMargin(
+        currentMargin: Money(Decimal(string: "374.10")!),
+        forecast: .projected(Date(timeIntervalSince1970: 0)),
+        projectedMargin: Money(Decimal(string: "-4687.46")!)
+      ),
+      "$4,687.46 projected over"
     )
   }
 }

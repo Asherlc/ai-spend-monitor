@@ -61,7 +61,7 @@ final class PacingEngineTests: XCTestCase {
   func testReportsBudgetAlreadyReached() {
     let start = Date(timeIntervalSince1970: 0)
     let result = PacingEngine().evaluate(
-      spend: Money(500),
+      spend: Money(Decimal(string: "1125.90")!),
       budgets: [
         BudgetDefinition(
           id: UUID(),
@@ -81,6 +81,10 @@ final class PacingEngineTests: XCTestCase {
 
     XCTAssertEqual(result.budgets.first?.exhaustionForecast, .reached)
     XCTAssertEqual(result.budgets.first?.usageFraction, 1)
+    XCTAssertEqual(
+      result.budgets.first?.currentMargin,
+      Money(Decimal(string: "-625.90")!)
+    )
   }
 
   func testZeroSpendLastsThroughMonth() {

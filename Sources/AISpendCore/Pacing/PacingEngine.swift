@@ -10,6 +10,7 @@ public struct BudgetEvaluation: Identifiable, Hashable, Sendable {
   public let id: UUID
   public let limit: Money
   public let state: BudgetPacingState
+  public let currentMargin: Money?
   public let projectedMargin: Money?
   public let exhaustionForecast: BudgetExhaustionForecast?
   public let usageFraction: Double?
@@ -49,6 +50,7 @@ public struct PacingEngine: Sendable {
             id: $0.id,
             limit: $0.limit,
             state: .unknown,
+            currentMargin: nil,
             projectedMargin: nil,
             exhaustionForecast: nil,
             usageFraction: nil
@@ -70,6 +72,7 @@ public struct PacingEngine: Sendable {
             id: $0.id,
             limit: $0.limit,
             state: .collecting,
+            currentMargin: $0.limit - spend,
             projectedMargin: nil,
             exhaustionForecast: nil,
             usageFraction: usageFraction(
@@ -91,6 +94,7 @@ public struct PacingEngine: Sendable {
           id: budget.id,
           limit: budget.limit,
           state: projection <= budget.limit ? .onPace : .offPace,
+          currentMargin: budget.limit - spend,
           projectedMargin: budget.limit - projection,
           exhaustionForecast: exhaustionForecast(
             spend: spend,
