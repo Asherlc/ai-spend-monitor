@@ -59,7 +59,6 @@ struct LocalLogScanner {
   let priceCatalog: PriceCatalog
   let calendar: Calendar
   let candidateLine: CandidateLine
-  let onFileScan: @Sendable (URL) -> Void
   let parser: UsageParser
 
   init(
@@ -68,7 +67,6 @@ struct LocalLogScanner {
     priceCatalog: PriceCatalog,
     calendar: Calendar,
     candidateLine: @escaping CandidateLine = { _ in true },
-    onFileScan: @escaping @Sendable (URL) -> Void = { _ in },
     parser: @escaping UsageParser
   ) {
     self.provider = provider
@@ -76,7 +74,6 @@ struct LocalLogScanner {
     self.priceCatalog = priceCatalog
     self.calendar = calendar
     self.candidateLine = candidateLine
-    self.onFileScan = onFileScan
     self.parser = parser
   }
 
@@ -109,7 +106,6 @@ struct LocalLogScanner {
     for file in files {
       try Task.checkCancellation()
       do {
-        onFileScan(file.url)
         var parserContext = LogParseContext(
           relativePath: relativePath(file.url, to: file.root),
           sourcePath: file.url.resolvingSymlinksInPath().path

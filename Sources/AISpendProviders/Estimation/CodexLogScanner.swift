@@ -108,20 +108,41 @@ public struct CodexLogScanner: Sendable {
   }
 }
 
+private struct CodexLineageSnapshot: Sendable {
+  let timestamp: Date
+  let totals: CodexTokenCounters
+  let localBaseline: CodexTokenCounters?
+}
+
 private struct CodexRetainedUsageEvent: Sendable {
   let timestampValue: String
   let timestamp: Date
-  let model: String
+  let model: String?
   let total: CodexTokenCounters?
   let last: CodexTokenCounters?
   let explicitEventID: String?
   let lineNumber: Int
+  let lineageTotals: CodexTokenCounters?
+  let localBaseline: CodexTokenCounters?
+
+  var lineageSnapshot: CodexLineageSnapshot? {
+    guard let lineageTotals else { return nil }
+    return CodexLineageSnapshot(
+      timestamp: timestamp,
+      totals: lineageTotals,
+      localBaseline: localBaseline
+    )
+  }
 
   func replay(
     relativePath: String,
     usageState: inout CodexUsageState
   ) -> LocalUsage? {
-    guard let delta = usageState.consume(total: total, last: last), !delta.isZero else {
+    guard
+      let model,
+      let delta = usageState.consume(total: total, last: last),
+      !delta.isZero
+    else {
       return nil
     }
     let eventID =
@@ -319,19 +340,13 @@ struct CodexFileFingerprint: Sendable {
 }
 
 private enum CodexLineageIndex {
-  private struct Snapshot {
-    let timestamp: Date
-    let totals: CodexTokenCounters
-    let localBaseline: CodexTokenCounters?
-  }
-
   private struct SessionFile {
     let fingerprint: CodexFileFingerprint
     var sessionID: String?
     var parentSessionID: String?
     var hasEmbeddedAncestorMetadata = false
     var forkTimestamp: Date?
-    var snapshots: [Snapshot] = []
+    var historicalSnapshots: [CodexLineageSnapshot] = []
     var usageState = CodexUsageState(lineage: nil)
     var sourceUnavailable = false
   }
@@ -340,6 +355,21 @@ private enum CodexLineageIndex {
     let file: LocalLogFile
     let fingerprint: CodexFileFingerprint
     let sessionID: String?
+  }
+
+  private struct SessionReference {
+    let path: String
+    let file: SessionFile
+  }
+
+  private struct ParsedTokenEvent {
+    let timestampValue: String
+    let timestamp: Date
+    let model: String?
+    let total: CodexTokenCounters?
+    let last: CodexTokenCounters?
+    let explicitEventID: String?
+    let localBaseline: CodexTokenCounters?
   }
 
   private struct DeepScanResult {
@@ -367,8 +397,12 @@ private enum CodexLineageIndex {
     onDeepScan: @Sendable (URL) -> Void
   ) throws -> CodexLineageBuild {
     let timestampParser = TimestampParser()
+    let canonicalCandidates = canonicalFiles(candidateFiles)
     var discoveredByPath: [String: DiscoveredFile] = [:]
-    for root in sessionRoots.map(\.standardizedFileURL) {
+    var seenRootPaths: Set<String> = []
+    let canonicalRoots = sessionRoots.map(\.standardizedFileURL).sorted { $0.path < $1.path }
+      .filter { seenRootPaths.insert($0.path).inserted }
+    for root in canonicalRoots {
       guard
         let enumerator = FileManager.default.enumerator(
           at: root,
@@ -395,11 +429,13 @@ private enum CodexLineageIndex {
         guard let fingerprint = CodexFileFingerprint(file: file) else { continue }
         let localFile = LocalLogFile(root: root, url: file.standardizedFileURL)
         let path = file.resolvingSymlinksInPath().path
-        discoveredByPath[path] = DiscoveredFile(
-          file: localFile,
-          fingerprint: fingerprint,
-          sessionID: discoverSessionID(in: localFile)
-        )
+        if discoveredByPath[path] == nil {
+          discoveredByPath[path] = DiscoveredFile(
+            file: localFile,
+            fingerprint: fingerprint,
+            sessionID: discoverSessionID(in: localFile)
+          )
+        }
       }
     }
 
@@ -414,7 +450,7 @@ private enum CodexLineageIndex {
     var filesByPath: [String: SessionFile] = [:]
     var retainedCandidatesByPath: [String: CodexRetainedCandidate] = [:]
     var diagnostics: [LocalLogDiagnostic] = []
-    for candidate in candidateFiles {
+    for candidate in canonicalCandidates {
       try Task.checkCancellation()
       let path = candidate.url.resolvingSymlinksInPath().path
       guard let discovered = discoveredByPath[path] else { continue }
@@ -475,49 +511,68 @@ private enum CodexLineageIndex {
       }
     }
 
-    var sessionsByID: [String: SessionFile] = [:]
+    var sessionsByID: [String: SessionReference] = [:]
     for path in filesByPath.keys.sorted() {
       guard let file = filesByPath[path], let sessionID = file.sessionID else { continue }
-      sessionsByID[sessionID] = sessionsByID[sessionID] ?? file
+      sessionsByID[sessionID] = sessionsByID[sessionID] ?? SessionReference(path: path, file: file)
     }
-    var lineageByPath = filesByPath.mapValues { file in
+    var lineageByPath: [String: CodexLineage] = [:]
+    for path in filesByPath.keys.sorted() {
+      try Task.checkCancellation()
+      guard let file = filesByPath[path] else { continue }
+      let fingerprints = try fingerprintChain(
+        startingAt: SessionReference(path: path, file: file),
+        sessionsByID: sessionsByID,
+        discoveredPathsBySessionID: discoveredPathsBySessionID
+      )
       guard !file.sourceUnavailable, !file.usageState.hasFailed else {
-        return CodexLineage(
+        lineageByPath[path] = CodexLineage(
           inheritedBaseline: nil,
           isUnresolvedFork: true,
-          fingerprints: [file.fingerprint]
+          fingerprints: fingerprints
         )
+        continue
       }
       guard let parentID = file.parentSessionID else {
-        return CodexLineage(
+        lineageByPath[path] = CodexLineage(
           inheritedBaseline: nil,
           isUnresolvedFork: false,
-          fingerprints: [file.fingerprint]
+          fingerprints: fingerprints
         )
+        continue
       }
       guard discoveredPathsBySessionID[parentID]?.count == 1,
-        let parent = sessionsByID[parentID]
+        let parentReference = sessionsByID[parentID]
       else {
-        return CodexLineage(
+        lineageByPath[path] = CodexLineage(
           inheritedBaseline: nil,
           isUnresolvedFork: true,
-          fingerprints: [file.fingerprint]
+          fingerprints: fingerprints
         )
+        continue
       }
+      let parent = parentReference.file
       guard !parent.sourceUnavailable, !parent.usageState.hasFailed else {
-        return CodexLineage(
+        lineageByPath[path] = CodexLineage(
           inheritedBaseline: nil,
           isUnresolvedFork: true,
-          fingerprints: [file.fingerprint, parent.fingerprint]
+          fingerprints: fingerprints
         )
+        continue
       }
-      let eligible = parent.snapshots.filter { snapshot in
+      let eligible = snapshots(
+        for: parentReference,
+        retainedCandidatesByPath: retainedCandidatesByPath
+      ).filter { snapshot in
         file.forkTimestamp.map { snapshot.timestamp <= $0 } ?? true
       }
       let baseline = eligible.reduce(nil as CodexTokenCounters?) { current, snapshot in
         current?.componentwiseMaximum(with: snapshot.totals) ?? snapshot.totals
       }
-      let firstChildSnapshot = file.snapshots.first
+      let firstChildSnapshot = snapshots(
+        for: SessionReference(path: path, file: file),
+        retainedCandidatesByPath: retainedCandidatesByPath
+      ).first
       let matchesParentSnapshot =
         firstChildSnapshot.map { childSnapshot in
           eligible.contains { $0.totals == childSnapshot.totals }
@@ -533,26 +588,28 @@ private enum CodexLineageIndex {
       let hasIndependentCounterEvidence =
         firstChildSnapshot.map { !$0.totals.isZero && $0.localBaseline == .zero } ?? false
       if baseline == nil && !hasIndependentCounterEvidence {
-        return CodexLineage(
+        lineageByPath[path] = CodexLineage(
           inheritedBaseline: nil,
           isUnresolvedFork: true,
-          fingerprints: [file.fingerprint, parent.fingerprint]
+          fingerprints: fingerprints
         )
+        continue
       }
       if !hasCopiedPrefixEvidence {
-        return CodexLineage(
+        lineageByPath[path] = CodexLineage(
           inheritedBaseline: nil,
           isUnresolvedFork: false,
-          fingerprints: [file.fingerprint, parent.fingerprint]
+          fingerprints: fingerprints
         )
+        continue
       }
-      return CodexLineage(
+      lineageByPath[path] = CodexLineage(
         inheritedBaseline: baseline,
         isUnresolvedFork: baseline == nil,
-        fingerprints: [file.fingerprint, parent.fingerprint]
+        fingerprints: fingerprints
       )
     }
-    for candidate in candidateFiles {
+    for candidate in canonicalCandidates {
       let path = candidate.url.resolvingSymlinksInPath().path
       if lineageByPath[path] == nil {
         lineageByPath[path] = CodexLineage(
@@ -562,7 +619,7 @@ private enum CodexLineageIndex {
         )
       }
     }
-    let candidates = candidateFiles.compactMap { candidate in
+    let candidates = canonicalCandidates.compactMap { candidate in
       retainedCandidatesByPath[candidate.url.resolvingSymlinksInPath().path]
     }
     return CodexLineageBuild(
@@ -570,6 +627,53 @@ private enum CodexLineageIndex {
       candidates: candidates,
       diagnostics: diagnostics
     )
+  }
+
+  private static func canonicalFiles(_ files: [LocalLogFile]) -> [LocalLogFile] {
+    var seenPaths: Set<String> = []
+    return files.sorted { lhs, rhs in
+      if lhs.root.path != rhs.root.path {
+        return lhs.root.path < rhs.root.path
+      }
+      return lhs.url.path < rhs.url.path
+    }.filter { file in
+      seenPaths.insert(file.url.resolvingSymlinksInPath().path).inserted
+    }
+  }
+
+  private static func snapshots(
+    for reference: SessionReference,
+    retainedCandidatesByPath: [String: CodexRetainedCandidate]
+  ) -> [CodexLineageSnapshot] {
+    if let candidate = retainedCandidatesByPath[reference.path] {
+      return candidate.events.compactMap(\.lineageSnapshot)
+    }
+    return reference.file.historicalSnapshots
+  }
+
+  private static func fingerprintChain(
+    startingAt reference: SessionReference,
+    sessionsByID: [String: SessionReference],
+    discoveredPathsBySessionID: [String: Set<String>]
+  ) throws -> [CodexFileFingerprint] {
+    var fingerprints: [CodexFileFingerprint] = []
+    var visitedPaths: Set<String> = []
+    var current: SessionReference? = reference
+    while let session = current, visitedPaths.insert(session.path).inserted {
+      try Task.checkCancellation()
+      fingerprints.append(session.file.fingerprint)
+      guard
+        let parentID = session.file.parentSessionID,
+        let paths = discoveredPathsBySessionID[parentID],
+        paths.count == 1,
+        let parent = sessionsByID[parentID],
+        paths.contains(parent.path)
+      else {
+        break
+      }
+      current = parent
+    }
+    return fingerprints
   }
 
   private static func discoverSessionID(in file: LocalLogFile) -> String? {
@@ -641,22 +745,41 @@ private enum CodexLineageIndex {
         }
         if dictionary["type"] as? String == "session_meta" {
           observeMetadata(dictionary, in: &session, timestampParser: timestampParser)
-        } else {
-          observeSnapshot(dictionary, in: &session, timestampParser: timestampParser)
+          return
         }
-        guard retainCandidateEvents else { return }
         if dictionary["type"] as? String == "turn_context",
           let payload = dictionary["payload"] as? [String: Any],
           let model = payload["model"] as? String
         {
           currentModel = model
-        } else if let event = retainedUsageEvent(
-          dictionary,
-          currentModel: currentModel,
-          lineNumber: lineNumber,
-          timestampParser: timestampParser
-        ) {
-          retainedEvents.append(event)
+          return
+        }
+        guard
+          let event = parsedTokenEvent(
+            dictionary,
+            currentModel: currentModel,
+            timestampParser: timestampParser
+          )
+        else {
+          return
+        }
+        let snapshot = lineageSnapshot(for: event, in: &session)
+        if retainCandidateEvents {
+          retainedEvents.append(
+            CodexRetainedUsageEvent(
+              timestampValue: event.timestampValue,
+              timestamp: event.timestamp,
+              model: event.model,
+              total: event.total,
+              last: event.last,
+              explicitEventID: event.explicitEventID,
+              lineNumber: lineNumber,
+              lineageTotals: snapshot?.totals,
+              localBaseline: event.localBaseline
+            )
+          )
+        } else if let snapshot {
+          session.historicalSnapshots.append(snapshot)
         }
       }
       return DeepScanResult(
@@ -676,19 +799,17 @@ private enum CodexLineageIndex {
     }
   }
 
-  private static func retainedUsageEvent(
+  private static func parsedTokenEvent(
     _ object: [String: Any],
     currentModel: String?,
-    lineNumber: Int,
     timestampParser: TimestampParser
-  ) -> CodexRetainedUsageEvent? {
+  ) -> ParsedTokenEvent? {
     guard
       object["type"] as? String == "event_msg",
       let timestampValue = object["timestamp"] as? String,
       let timestamp = timestampParser.parse(timestampValue),
       let payload = object["payload"] as? [String: Any],
       payload["type"] as? String == "token_count",
-      let model = payload["model"] as? String ?? currentModel,
       let info = payload["info"] as? [String: Any]
     else {
       return nil
@@ -704,15 +825,21 @@ private enum CodexLineageIndex {
     else {
       return nil
     }
-    return CodexRetainedUsageEvent(
+    let localBaseline: CodexTokenCounters? =
+      if let total, let last {
+        total.subtracting(last)
+      } else {
+        nil
+      }
+    return ParsedTokenEvent(
       timestampValue: timestampValue,
       timestamp: timestamp,
-      model: model,
+      model: payload["model"] as? String ?? currentModel,
       total: total,
       last: last,
       explicitEventID: string(in: object, keys: ["event_id", "id"])
         ?? string(in: payload, keys: ["event_id", "id"]),
-      lineNumber: lineNumber
+      localBaseline: localBaseline
     )
   }
 
@@ -749,46 +876,20 @@ private enum CodexLineageIndex {
     session.forkTimestamp = session.forkTimestamp ?? timestamp.flatMap(timestampParser.parse)
   }
 
-  private static func observeSnapshot(
-    _ object: [String: Any],
-    in session: inout SessionFile,
-    timestampParser: TimestampParser
-  ) {
-    guard
-      object["type"] as? String == "event_msg",
-      let timestamp = object["timestamp"] as? String,
-      let date = timestampParser.parse(timestamp),
-      let payload = object["payload"] as? [String: Any],
-      payload["type"] as? String == "token_count",
-      let info = payload["info"] as? [String: Any]
-    else {
-      return
-    }
-    let totalObject = info["total_token_usage"] as? [String: Any]
-    let lastObject = info["last_token_usage"] as? [String: Any]
-    let total = totalObject.flatMap(CodexTokenCounters.init)
-    let last = lastObject.flatMap(CodexTokenCounters.init)
-    guard
-      totalObject == nil || total != nil,
-      lastObject == nil || last != nil,
-      total != nil || last != nil
-    else {
-      return
-    }
-    let localBaseline: CodexTokenCounters? =
-      if let total, let last {
-        total.subtracting(last)
-      } else {
-        nil
-      }
-    _ = session.usageState.consume(total: total, last: last)
+  private static func lineageSnapshot(
+    for event: ParsedTokenEvent,
+    in session: inout SessionFile
+  ) -> CodexLineageSnapshot? {
+    _ = session.usageState.consume(total: event.total, last: event.last)
     guard !session.usageState.hasFailed,
       let totals = session.usageState.currentWatermark
     else {
-      return
+      return nil
     }
-    session.snapshots.append(
-      Snapshot(timestamp: date, totals: totals, localBaseline: localBaseline)
+    return CodexLineageSnapshot(
+      timestamp: event.timestamp,
+      totals: totals,
+      localBaseline: event.localBaseline
     )
   }
 
