@@ -1013,8 +1013,10 @@ private enum CodexLineageIndex {
   ) -> String? {
     identifier(in: payload, keys: ["id"])
       ?? identifier(in: object, keys: ["id"])
-      ?? identifier(in: payload, keys: ["session_id", "sessionId"])
-      ?? identifier(in: object, keys: ["session_id", "sessionId"])
+      ?? identifier(in: payload, keys: ["session_id"])
+      ?? identifier(in: payload, keys: ["sessionId"])
+      ?? identifier(in: object, keys: ["session_id"])
+      ?? identifier(in: object, keys: ["sessionId"])
   }
 
   private static func identifier(in object: [String: Any], keys: [String]) -> String? {
