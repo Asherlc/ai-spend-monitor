@@ -5,6 +5,502 @@ import XCTest
 @testable import AISpendProviders
 
 final class CodexLogScannerTests: XCTestCase {
+  func testCumulativeTotalReconcilesEarlierLastOnlyUsage() throws {
+    let result = try scanCodexLines([
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      #"{"timestamp":"2026-06-12T10:45:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ])
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 150)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testLastOnlyCounterOverflowFailsClosedWithoutCrashing() throws {
+    let result = try scanCodexLines([
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":\#(Int.max),"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      #"{"timestamp":"2026-06-12T10:45:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ])
+
+    XCTAssertTrue(result.records.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "session.jsonl")])
+  }
+
+  func testInterleavedCounterGrowthIsContainedByHighWatermark() throws {
+    let result = try scanCodexLines([
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      #"{"timestamp":"2026-06-12T10:45:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":40,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      #"{"timestamp":"2026-06-12T10:45:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":70,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":110,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ])
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 110)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testWhitespaceForkIdentifierDoesNotSuppressRootSessionUsage() throws {
+    let result = try scanCodexLines([
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"session_meta","payload":{"id":"root-session","forked_from_id":"   "}}"#,
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ])
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 100)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testForkResolvesParentWhoseSessionIdentifierIsTopLevel() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("parent.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"session_meta","id":"top-level-parent"}"#,
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"top-level-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar
+    ).scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 150)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testRepeatedFlatTotalSnapshotWithNonzeroLastUsageContributesZero() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("flat-total.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:59Z","type":"session_meta","payload":{"id":"flat-session"}}"#,
+        #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:45:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar
+    ).scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(result.records.count, 1)
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 1_000)
+    XCTAssertEqual(result.records.first?.estimate?.cachedInputTokens, 0)
+    XCTAssertEqual(result.records.first?.estimate?.outputTokens, 0)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testForkedSessionCountsOnlyGrowthBeyondCopiedParentPrefix() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("parent.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"session_meta","payload":{"id":"parent-session"}}"#,
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:45:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"parent-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session"}}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1250,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar
+    ).scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(result.records.count, 1)
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 1_250)
+    XCTAssertEqual(result.records.first?.estimate?.cachedInputTokens, 0)
+    XCTAssertEqual(result.records.first?.estimate?.outputTokens, 0)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testForkedSubagentWithIndependentCounterCountsFromZero() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("parent.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"session_meta","payload":{"id":"parent-session"}}"#,
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"independent-child","forked_from_id":"parent-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session"}}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":20,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+
+    let result = try scanCodexRoot(root)
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 1_020)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testIndependentSubagentRemainsIndependentAfterSurpassingParentTotal() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("parent.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"session_meta","payload":{"id":"parent-session"}}"#,
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"independent-child","forked_from_id":"parent-session","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent-session"}}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1190,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1200,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+
+    let result = try scanCodexRoot(root)
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 2_200)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testCurrentMonthForkResolvesParentFileModifiedBeforeWindow() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let parent = root.appendingPathComponent("old-parent.jsonl")
+    try writeCodexSession(
+      to: parent,
+      lines: [
+        #"{"timestamp":"2026-05-31T10:44:00Z","type":"session_meta","payload":{"id":"old-parent"}}"#,
+        #"{"timestamp":"2026-05-31T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-05-31T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try setModificationDate(parent, to: isoDate("2026-05-31T12:00:00Z"))
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"old-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+
+    let result = try scanCodexRoot(root)
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testLineageDeepScansOnlyCandidateAndReachableHistoricalParent() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let parent = root.appendingPathComponent("old-parent.jsonl")
+    try writeCodexSession(
+      to: parent,
+      lines: [
+        #"{"timestamp":"2026-05-31T10:44:00Z","type":"session_meta","payload":{"id":"reachable-parent"}}"#,
+        #"{"timestamp":"2026-05-31T10:45:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try setModificationDate(parent, to: isoDate("2026-05-31T12:00:00Z"))
+    let unrelated = root.appendingPathComponent("unrelated-old.jsonl")
+    try writeCodexSession(
+      to: unrelated,
+      lines: [
+        #"{"timestamp":"2026-05-30T10:44:00Z","type":"session_meta","payload":{"id":"unrelated-session"}}"#,
+        #"{"timestamp":"2026-05-30T10:45:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":900,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":900,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try setModificationDate(unrelated, to: isoDate("2026-05-30T12:00:00Z"))
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"reachable-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let recorder = CodexDeepScanRecorder()
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar,
+      onLineageDeepScan: { recorder.record($0.lastPathComponent) }
+    ).scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
+    XCTAssertEqual(Set(recorder.fileNames), ["child.jsonl", "old-parent.jsonl"])
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testDuplicateParentSessionIdentifiersFailClosed() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let firstParent = root.appendingPathComponent("a-parent.jsonl")
+    try writeCodexSession(
+      to: firstParent,
+      lines: [
+        #"{"timestamp":"2026-05-30T10:44:00Z","type":"session_meta","payload":{"id":"duplicate-parent"}}"#,
+        #"{"timestamp":"2026-05-30T10:45:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try setModificationDate(firstParent, to: isoDate("2026-05-30T12:00:00Z"))
+    let secondParent = root.appendingPathComponent("b-parent.jsonl")
+    try writeCodexSession(
+      to: secondParent,
+      lines: [
+        #"{"timestamp":"2026-05-31T10:44:00Z","type":"session_meta","payload":{"id":"duplicate-parent"}}"#,
+        #"{"timestamp":"2026-05-31T10:45:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":200,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try setModificationDate(secondParent, to: isoDate("2026-05-31T12:00:00Z"))
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"duplicate-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+
+    let result = try scanCodexRoot(root)
+
+    XCTAssertTrue(result.records.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
+  }
+
+  func testDuplicateParentIdentifierBeyondMetadataPrefixFailsClosed() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let oldParent = root.appendingPathComponent("a-old-parent.jsonl")
+    try writeCodexSession(
+      to: oldParent,
+      lines: [
+        #"{"timestamp":"2026-05-31T10:44:00Z","type":"session_meta","payload":{"id":"duplicate-parent"}}"#,
+        #"{"timestamp":"2026-05-31T10:45:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try setModificationDate(oldParent, to: isoDate("2026-05-31T12:00:00Z"))
+    try writeCodexSession(
+      to: root.appendingPathComponent("z-late-parent.jsonl"),
+      lines: [
+        String(repeating: "x", count: 70_000),
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"session_meta","payload":{"id":"duplicate-parent"}}"#,
+      ]
+    )
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"duplicate-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+
+    let result = try scanCodexRoot(root)
+
+    XCTAssertTrue(result.records.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
+  }
+
+  func testCumulativeChildResolvesLastOnlyParentBaseline() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("parent.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"session_meta","payload":{"id":"legacy-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child-session","forked_from_id":"legacy-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+
+    let result = try scanCodexRoot(root)
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 150)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testForkWithResolvedParentButNoUsageBaselineFailsClosed() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("parent.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"session_meta","payload":{"id":"metadata-only-parent"}}"#
+      ]
+    )
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"compact-child","forked_from_id":"metadata-only-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+
+    let result = try scanCodexRoot(root)
+
+    XCTAssertTrue(result.records.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
+  }
+
+  func testScanUsesStableCandidateSnapshotAcrossLineageBoundary() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("stable.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let changed = root.appendingPathComponent("changed.jsonl")
+    try writeCodexSession(
+      to: changed,
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let late = root.appendingPathComponent("late.jsonl")
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+    let scanner = CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar,
+      afterLineageScan: {
+        try appendCodexLine(
+          #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"changed-child","forked_from_id":"missing-parent"}}"#,
+          to: changed
+        )
+        try writeCodexSession(
+          to: late,
+          lines: [
+            #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+            #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+          ]
+        )
+      }
+    )
+
+    let result = try scanner.scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "changed.jsonl")])
+  }
+
+  func testCandidateMissingDuringLineageScanFailsClosedIfRecreatedBeforeBilling() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    try writeCodexSession(
+      to: root.appendingPathComponent("stable.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let recreated = root.appendingPathComponent("recreated.jsonl")
+    let recreatedLines = [
+      #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ]
+    try writeCodexSession(to: recreated, lines: recreatedLines)
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+    let scanner = CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar,
+      beforeLineageScan: {
+        try FileManager.default.removeItem(at: recreated)
+      },
+      afterLineageScan: {
+        try writeCodexSession(to: recreated, lines: recreatedLines)
+      }
+    )
+
+    let result = try scanner.scan(window: window, fetchedAt: window.end)
+
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "recreated.jsonl")])
+  }
+
   func testSkipsIrrelevantLinesBeforeJSONDecoding() throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -174,6 +670,51 @@ private func codexRootWithRepeatedUsage() throws -> URL {
   ).write(to: file)
   try setModificationDate(file)
   return root
+}
+
+private func writeCodexSession(to file: URL, lines: [String]) throws {
+  try Data((lines.joined(separator: "\n") + "\n").utf8).write(to: file)
+  try setModificationDate(file)
+}
+
+private func appendCodexLine(_ line: String, to file: URL) throws {
+  let handle = try FileHandle(forWritingTo: file)
+  defer { try? handle.close() }
+  try handle.seekToEnd()
+  try handle.write(contentsOf: Data((line + "\n").utf8))
+}
+
+private func scanCodexLines(_ lines: [String]) throws -> LocalLogScanResult {
+  let root = try emptyRoot()
+  defer { try? FileManager.default.removeItem(at: root) }
+  try writeCodexSession(to: root.appendingPathComponent("session.jsonl"), lines: lines)
+  return try scanCodexRoot(root)
+}
+
+private func scanCodexRoot(_ root: URL) throws -> LocalLogScanResult {
+  let calendar = utcCalendar()
+  let window = try MonthWindow.current(
+    containing: isoDate("2026-06-15T00:00:00Z"),
+    calendar: calendar
+  )
+  return try CodexLogScanner(
+    sessionRoots: [root],
+    priceCatalog: try PriceCatalog.bundled(),
+    calendar: calendar
+  ).scan(window: window, fetchedAt: window.end)
+}
+
+private final class CodexDeepScanRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedFileNames: [String] = []
+
+  var fileNames: [String] {
+    lock.withLock { recordedFileNames }
+  }
+
+  func record(_ fileName: String) {
+    lock.withLock { recordedFileNames.append(fileName) }
+  }
 }
 
 func utcCalendar() -> Calendar {

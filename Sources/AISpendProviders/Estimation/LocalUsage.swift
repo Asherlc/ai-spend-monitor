@@ -80,13 +80,37 @@ struct LocalLogScanner {
   func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
     try Task.checkCancellation()
     var diagnostics: [LocalLogDiagnostic] = []
+    let files = try Self.candidateFiles(
+      sessionRoots: sessionRoots,
+      window: window,
+      diagnostics: &diagnostics
+    )
+    return try scan(
+      window: window,
+      fetchedAt: fetchedAt,
+      files: files,
+      initialDiagnostics: diagnostics
+    )
+  }
+
+  func scan(
+    window: MonthWindow,
+    fetchedAt: Date,
+    files: [LocalLogFile],
+    initialDiagnostics: [LocalLogDiagnostic]
+  ) throws -> LocalLogScanResult {
+    try Task.checkCancellation()
+    var diagnostics = initialDiagnostics
     var usageByID: [BilledUsageKey: LocalUsage] = [:]
 
-    for file in try candidateFiles(window: window, diagnostics: &diagnostics) {
+    for file in files {
       try Task.checkCancellation()
       do {
-        var parserContext = LogParseContext(relativePath: relativePath(file.url, to: file.root))
-        try scan(file: file.url, relativeTo: file.root) { data, lineNumber in
+        var parserContext = LogParseContext(
+          relativePath: relativePath(file.url, to: file.root),
+          sourcePath: file.url.resolvingSymlinksInPath().path
+        )
+        try Self.scanFile(file: file.url, relativeTo: file.root) { data, lineNumber in
           parserContext.lineNumber = lineNumber
           guard data.isEmpty || candidateLine(data) else {
             return
@@ -181,17 +205,18 @@ struct LocalLogScanner {
     )
   }
 
-  private func candidateFiles(
+  static func candidateFiles(
+    sessionRoots: [URL],
     window: MonthWindow,
     diagnostics: inout [LocalLogDiagnostic]
-  ) throws -> [(root: URL, url: URL)] {
+  ) throws -> [LocalLogFile] {
     let keys: [URLResourceKey] = [
       .contentModificationDateKey,
       .isDirectoryKey,
       .isRegularFileKey,
       .isSymbolicLinkKey,
     ]
-    var files: [(root: URL, url: URL)] = []
+    var files: [LocalLogFile] = []
     for root in sessionRoots.map(\.standardizedFileURL) {
       guard
         let enumerator = FileManager.default.enumerator(
@@ -220,7 +245,7 @@ struct LocalLogScanner {
         else {
           continue
         }
-        files.append((root, item.standardizedFileURL))
+        files.append(LocalLogFile(root: root, url: item.standardizedFileURL))
       }
     }
     return files.sorted { lhs, rhs in
@@ -231,7 +256,7 @@ struct LocalLogScanner {
     }
   }
 
-  private func scan(
+  static func scanFile(
     file: URL,
     relativeTo root: URL,
     process: (Data, Int) -> Void
@@ -290,6 +315,25 @@ struct LocalLogScanner {
     }
   }
 
+  static func readFilePrefix(
+    file: URL,
+    relativeTo root: URL,
+    maximumBytes: Int
+  ) throws -> Data {
+    let rootComponents = root.standardizedFileURL.pathComponents
+    let fileComponents = file.standardizedFileURL.pathComponents
+    guard fileComponents.starts(with: rootComponents) else {
+      throw SourceHostError.pathNotAllowed
+    }
+    let relativeComponents = Array(fileComponents.dropFirst(rootComponents.count))
+    let descriptor = try SecureFileReader.openFile(
+      root: root,
+      relativeComponents: relativeComponents
+    )
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    return try handle.read(upToCount: maximumBytes) ?? Data()
+  }
+
   private static func observationID(
     provider: ProviderID,
     model: String,
@@ -333,16 +377,28 @@ struct LocalLogScanner {
   }
 }
 
+struct LocalLogFile: Sendable {
+  let root: URL
+  let url: URL
+}
+
 struct LogParseContext {
   var model: String?
   let relativePath: String
+  let sourcePath: String
   var lineNumber = 0
+  var codexUsageState: CodexUsageState?
   private let timestampFormatter = ISO8601DateFormatter()
   private let fractionalTimestampFormatter: ISO8601DateFormatter = {
     let formatter = ISO8601DateFormatter()
     formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     return formatter
   }()
+
+  init(relativePath: String, sourcePath: String? = nil) {
+    self.relativePath = relativePath
+    self.sourcePath = sourcePath ?? relativePath
+  }
 
   func parseTimestamp(_ value: String) -> Date? {
     fractionalTimestampFormatter.date(from: value)
