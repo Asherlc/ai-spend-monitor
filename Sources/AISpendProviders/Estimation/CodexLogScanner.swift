@@ -5,6 +5,8 @@ public struct CodexLogScanner: Sendable {
   private let sessionRoots: [URL]
   private let priceCatalog: PriceCatalog
   private let calendar: Calendar
+  private let beforeLineageScan: @Sendable () throws -> Void
+  private let afterLineageScan: @Sendable () throws -> Void
 
   public init(
     priceCatalog: PriceCatalog,
@@ -21,15 +23,30 @@ public struct CodexLogScanner: Sendable {
   init(
     sessionRoots: [URL],
     priceCatalog: PriceCatalog,
-    calendar: Calendar
+    calendar: Calendar,
+    beforeLineageScan: @escaping @Sendable () throws -> Void = {},
+    afterLineageScan: @escaping @Sendable () throws -> Void = {}
   ) {
     self.sessionRoots = sessionRoots
     self.priceCatalog = priceCatalog
     self.calendar = calendar
+    self.beforeLineageScan = beforeLineageScan
+    self.afterLineageScan = afterLineageScan
   }
 
   public func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
-    let lineage = try CodexLineageIndex.build(sessionRoots: sessionRoots, window: window)
+    var diagnostics: [LocalLogDiagnostic] = []
+    let files = try LocalLogScanner.candidateFiles(
+      sessionRoots: sessionRoots,
+      window: window,
+      diagnostics: &diagnostics
+    )
+    try beforeLineageScan()
+    let lineage = try CodexLineageIndex.build(
+      sessionRoots: sessionRoots,
+      candidateFiles: files
+    )
+    try afterLineageScan()
     return try LocalLogScanner(
       provider: .openAI,
       sessionRoots: sessionRoots,
@@ -43,7 +60,12 @@ public struct CodexLogScanner: Sendable {
       parser: { object, context in
         Self.parse(object, context: &context, lineage: lineage[context.sourcePath])
       }
-    ).scan(window: window, fetchedAt: fetchedAt)
+    ).scan(
+      window: window,
+      fetchedAt: fetchedAt,
+      files: files,
+      initialDiagnostics: diagnostics
+    )
   }
 
   private static let turnContextMarker = Data(#""turn_context""#.utf8)
@@ -173,11 +195,26 @@ struct CodexTokenCounters: Hashable, Sendable {
       output: output + other.output
     )
   }
+
+  func subtracting(_ other: Self) -> Self? {
+    guard input >= other.input, cached >= other.cached, output >= other.output else {
+      return nil
+    }
+    let input = input - other.input
+    let cached = cached - other.cached
+    guard input >= cached else { return nil }
+    return Self(
+      input: input,
+      cached: cached,
+      output: output - other.output
+    )
+  }
 }
 
 struct CodexLineage: Sendable {
   let inheritedBaseline: CodexTokenCounters?
   let isUnresolvedFork: Bool
+  let fingerprints: [CodexFileFingerprint]
 }
 
 struct CodexUsageState {
@@ -186,9 +223,13 @@ struct CodexUsageState {
   private let suppressUsage: Bool
   private let hasInheritedBaseline: Bool
 
+  var currentWatermark: CodexTokenCounters? { watermark }
+
   init(lineage: CodexLineage?) {
     watermark = lineage?.inheritedBaseline
-    suppressUsage = lineage?.isUnresolvedFork == true
+    suppressUsage =
+      lineage?.isUnresolvedFork == true
+      || lineage?.fingerprints.allSatisfy({ $0.isCurrent() }) == false
     hasInheritedBaseline = lineage?.inheritedBaseline != nil
   }
 
@@ -217,17 +258,45 @@ struct CodexUsageState {
   }
 }
 
+struct CodexFileFingerprint: Sendable {
+  let path: String
+  let size: Int
+  let modificationDate: Date
+
+  init?(file: URL) {
+    guard
+      let values = try? file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+      let size = values.fileSize,
+      let modificationDate = values.contentModificationDate
+    else {
+      return nil
+    }
+    path = file.resolvingSymlinksInPath().path
+    self.size = size
+    self.modificationDate = modificationDate
+  }
+
+  func isCurrent() -> Bool {
+    guard let current = Self(file: URL(fileURLWithPath: path)) else { return false }
+    return current.size == size && current.modificationDate == modificationDate
+  }
+}
+
 private enum CodexLineageIndex {
   private struct Snapshot {
     let timestamp: Date
     let totals: CodexTokenCounters
+    let localBaseline: CodexTokenCounters?
   }
 
   private struct SessionFile {
+    let fingerprint: CodexFileFingerprint
     var sessionID: String?
     var parentSessionID: String?
+    var hasEmbeddedAncestorMetadata = false
     var forkTimestamp: Date?
     var snapshots: [Snapshot] = []
+    var usageState = CodexUsageState(lineage: nil)
   }
 
   private struct TimestampParser {
@@ -243,7 +312,10 @@ private enum CodexLineageIndex {
     }
   }
 
-  static func build(sessionRoots: [URL], window: MonthWindow) throws -> [String: CodexLineage] {
+  static func build(
+    sessionRoots: [URL],
+    candidateFiles: [LocalLogFile]
+  ) throws -> [String: CodexLineage] {
     var filesByPath: [String: SessionFile] = [:]
     let timestampParser = TimestampParser()
     for root in sessionRoots.map(\.standardizedFileURL) {
@@ -262,17 +334,16 @@ private enum CodexLineageIndex {
         try Task.checkCancellation()
         guard
           let values = try? file.resourceValues(forKeys: [
-            .contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey,
+            .isRegularFileKey, .isSymbolicLinkKey,
           ]),
           values.isSymbolicLink != true,
           values.isRegularFile == true,
-          file.pathExtension == "jsonl",
-          let modified = values.contentModificationDate,
-          modified >= window.start
+          file.pathExtension == "jsonl"
         else {
           continue
         }
-        var session = SessionFile()
+        guard let fingerprint = CodexFileFingerprint(file: file) else { continue }
+        var session = SessionFile(fingerprint: fingerprint)
         do {
           try LocalLogScanner.scanFile(file: file, relativeTo: root) { data, _ in
             guard
@@ -302,12 +373,20 @@ private enum CodexLineageIndex {
       guard let file = filesByPath[path], let sessionID = file.sessionID else { continue }
       sessionsByID[sessionID] = sessionsByID[sessionID] ?? file
     }
-    return filesByPath.mapValues { file in
+    var lineageByPath = filesByPath.mapValues { file in
       guard let parentID = file.parentSessionID else {
-        return CodexLineage(inheritedBaseline: nil, isUnresolvedFork: false)
+        return CodexLineage(
+          inheritedBaseline: nil,
+          isUnresolvedFork: false,
+          fingerprints: [file.fingerprint]
+        )
       }
       guard let parent = sessionsByID[parentID] else {
-        return CodexLineage(inheritedBaseline: nil, isUnresolvedFork: true)
+        return CodexLineage(
+          inheritedBaseline: nil,
+          isUnresolvedFork: true,
+          fingerprints: [file.fingerprint]
+        )
       }
       let eligible = parent.snapshots.filter { snapshot in
         file.forkTimestamp.map { snapshot.timestamp <= $0 } ?? true
@@ -315,11 +394,43 @@ private enum CodexLineageIndex {
       let baseline = eligible.reduce(nil as CodexTokenCounters?) { current, snapshot in
         current?.componentwiseMaximum(with: snapshot.totals) ?? snapshot.totals
       }
+      let firstChildSnapshot = file.snapshots.first
+      let matchesParentSnapshot =
+        firstChildSnapshot.map { childSnapshot in
+          eligible.contains { $0.totals == childSnapshot.totals }
+        } ?? false
+      let locallyConfirmsBaseline =
+        if let baseline, let firstChildSnapshot {
+          firstChildSnapshot.localBaseline == baseline
+        } else {
+          false
+        }
+      let hasCopiedPrefixEvidence =
+        file.hasEmbeddedAncestorMetadata || matchesParentSnapshot || locallyConfirmsBaseline
+      if !hasCopiedPrefixEvidence {
+        return CodexLineage(
+          inheritedBaseline: nil,
+          isUnresolvedFork: false,
+          fingerprints: [file.fingerprint, parent.fingerprint]
+        )
+      }
       return CodexLineage(
         inheritedBaseline: baseline,
-        isUnresolvedFork: baseline == nil
+        isUnresolvedFork: baseline == nil,
+        fingerprints: [file.fingerprint, parent.fingerprint]
       )
     }
+    for candidate in candidateFiles {
+      let path = candidate.url.resolvingSymlinksInPath().path
+      if lineageByPath[path] == nil {
+        lineageByPath[path] = CodexLineage(
+          inheritedBaseline: nil,
+          isUnresolvedFork: true,
+          fingerprints: []
+        )
+      }
+    }
+    return lineageByPath
   }
 
   private static func observeMetadata(
@@ -334,7 +445,10 @@ private enum CodexLineageIndex {
     if session.sessionID == nil {
       session.sessionID = metadataID
     }
-    guard metadataID == nil || metadataID == session.sessionID else { return }
+    guard metadataID == nil || metadataID == session.sessionID else {
+      session.hasEmbeddedAncestorMetadata = true
+      return
+    }
     session.parentSessionID =
       session.parentSessionID
       ?? parentSessionID(
@@ -356,13 +470,32 @@ private enum CodexLineageIndex {
       let date = timestampParser.parse(timestamp),
       let payload = object["payload"] as? [String: Any],
       payload["type"] as? String == "token_count",
-      let info = payload["info"] as? [String: Any],
-      let totalsObject = info["total_token_usage"] as? [String: Any],
-      let totals = CodexTokenCounters(totalsObject)
+      let info = payload["info"] as? [String: Any]
     else {
       return
     }
-    session.snapshots.append(Snapshot(timestamp: date, totals: totals))
+    let totalObject = info["total_token_usage"] as? [String: Any]
+    let lastObject = info["last_token_usage"] as? [String: Any]
+    let total = totalObject.flatMap(CodexTokenCounters.init)
+    let last = lastObject.flatMap(CodexTokenCounters.init)
+    guard
+      totalObject == nil || total != nil,
+      lastObject == nil || last != nil,
+      total != nil || last != nil
+    else {
+      return
+    }
+    let localBaseline: CodexTokenCounters? =
+      if let total, let last {
+        total.subtracting(last)
+      } else {
+        nil
+      }
+    _ = session.usageState.consume(total: total, last: last)
+    guard let totals = session.usageState.currentWatermark else { return }
+    session.snapshots.append(
+      Snapshot(timestamp: date, totals: totals, localBaseline: localBaseline)
+    )
   }
 
   private static func parentSessionID(

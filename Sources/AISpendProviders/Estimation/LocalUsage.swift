@@ -80,9 +80,30 @@ struct LocalLogScanner {
   func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
     try Task.checkCancellation()
     var diagnostics: [LocalLogDiagnostic] = []
+    let files = try Self.candidateFiles(
+      sessionRoots: sessionRoots,
+      window: window,
+      diagnostics: &diagnostics
+    )
+    return try scan(
+      window: window,
+      fetchedAt: fetchedAt,
+      files: files,
+      initialDiagnostics: diagnostics
+    )
+  }
+
+  func scan(
+    window: MonthWindow,
+    fetchedAt: Date,
+    files: [LocalLogFile],
+    initialDiagnostics: [LocalLogDiagnostic]
+  ) throws -> LocalLogScanResult {
+    try Task.checkCancellation()
+    var diagnostics = initialDiagnostics
     var usageByID: [BilledUsageKey: LocalUsage] = [:]
 
-    for file in try candidateFiles(window: window, diagnostics: &diagnostics) {
+    for file in files {
       try Task.checkCancellation()
       do {
         var parserContext = LogParseContext(
@@ -184,17 +205,18 @@ struct LocalLogScanner {
     )
   }
 
-  private func candidateFiles(
+  static func candidateFiles(
+    sessionRoots: [URL],
     window: MonthWindow,
     diagnostics: inout [LocalLogDiagnostic]
-  ) throws -> [(root: URL, url: URL)] {
+  ) throws -> [LocalLogFile] {
     let keys: [URLResourceKey] = [
       .contentModificationDateKey,
       .isDirectoryKey,
       .isRegularFileKey,
       .isSymbolicLinkKey,
     ]
-    var files: [(root: URL, url: URL)] = []
+    var files: [LocalLogFile] = []
     for root in sessionRoots.map(\.standardizedFileURL) {
       guard
         let enumerator = FileManager.default.enumerator(
@@ -223,7 +245,7 @@ struct LocalLogScanner {
         else {
           continue
         }
-        files.append((root, item.standardizedFileURL))
+        files.append(LocalLogFile(root: root, url: item.standardizedFileURL))
       }
     }
     return files.sorted { lhs, rhs in
@@ -334,6 +356,11 @@ struct LocalLogScanner {
       .dropFirst(rootComponents.count)
       .joined(separator: "/")
   }
+}
+
+struct LocalLogFile: Sendable {
+  let root: URL
+  let url: URL
 }
 
 struct LogParseContext {
