@@ -315,6 +315,25 @@ struct LocalLogScanner {
     }
   }
 
+  static func readFilePrefix(
+    file: URL,
+    relativeTo root: URL,
+    maximumBytes: Int
+  ) throws -> Data {
+    let rootComponents = root.standardizedFileURL.pathComponents
+    let fileComponents = file.standardizedFileURL.pathComponents
+    guard fileComponents.starts(with: rootComponents) else {
+      throw SourceHostError.pathNotAllowed
+    }
+    let relativeComponents = Array(fileComponents.dropFirst(rootComponents.count))
+    let descriptor = try SecureFileReader.openFile(
+      root: root,
+      relativeComponents: relativeComponents
+    )
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    return try handle.read(upToCount: maximumBytes) ?? Data()
+  }
+
   private static func observationID(
     provider: ProviderID,
     model: String,
