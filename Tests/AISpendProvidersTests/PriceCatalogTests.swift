@@ -81,14 +81,14 @@ final class PriceCatalogTests: XCTestCase {
     }
   }
 
-  func testCatalogPricesCurrentCodexModelsAndTreatsAutoReviewAsNoCost() throws {
+  func testCatalogPricesCurrentCodexModelsFromOfficialCreditRateCard() throws {
     let cases: [(String, String)] = [
       ("gpt-5.4", "17.75"),
       ("gpt-5.5", "35.50"),
       ("gpt-5.6-sol", "35.50"),
       ("gpt-5.6-terra", "17.75"),
       ("gpt-5.6-luna", "7.10"),
-      ("codex-auto-review", "0"),
+      ("codex-auto-review", "15.925"),
     ]
 
     for (model, expected) in cases {

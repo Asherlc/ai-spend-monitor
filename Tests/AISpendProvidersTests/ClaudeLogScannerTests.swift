@@ -67,7 +67,7 @@ final class ClaudeLogScannerTests: XCTestCase {
     XCTAssertEqual(record.estimate?.cacheCreation1hInputTokens, 40_000)
     XCTAssertEqual(record.estimate?.cachedInputTokens, 200_000)
     XCTAssertEqual(record.estimate?.outputTokens, 100_000)
-    XCTAssertEqual(record.estimate?.catalogVersion, "2026-08-06")
+    XCTAssertEqual(record.estimate?.catalogVersion, "2026-07-27")
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 

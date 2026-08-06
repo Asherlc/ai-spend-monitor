@@ -1001,7 +1001,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertEqual(record.estimate?.inputTokens, 800_000)
     XCTAssertEqual(record.estimate?.cachedInputTokens, 200_000)
     XCTAssertEqual(record.estimate?.outputTokens, 100_000)
-    XCTAssertEqual(record.estimate?.catalogVersion, "2026-08-06")
+    XCTAssertEqual(record.estimate?.catalogVersion, "2026-07-27")
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
