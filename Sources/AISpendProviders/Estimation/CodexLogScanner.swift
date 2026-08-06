@@ -106,6 +106,7 @@ public struct CodexLogScanner: Sendable {
   fileprivate static let turnContextMarker = Data(#""turn_context""#.utf8)
   fileprivate static let tokenCountMarker = Data(#""token_count""#.utf8)
   fileprivate static let sessionMetadataMarker = Data(#""session_meta""#.utf8)
+  fileprivate static let interAgentMarker = Data(#""inter_agent_communication_metadata""#.utf8)
 
   private static func appendSourceUnavailable(
     _ fileName: String,
@@ -191,52 +192,15 @@ private struct CodexLineageBuild: Sendable {
   let lineage: [String: CodexLineage]
   let candidates: [CodexRetainedCandidate]
   let diagnostics: [LocalLogDiagnostic]
-  let fingerprintsByPath: [String: CodexFileFingerprint]
-  let parentPathByPath: [String: String]
   let retentionMetrics: CodexRetentionMetrics
 
   func currentCandidatePaths() throws -> Set<String> {
-    var fingerprintIsCurrent: [String: Bool] = [:]
-    for path in fingerprintsByPath.keys.sorted() {
-      try Task.checkCancellation()
-      guard let fingerprint = fingerprintsByPath[path] else { continue }
-      fingerprintIsCurrent[path] = fingerprint.isCurrent()
-    }
-
-    var validityByPath: [String: Bool] = [:]
-    var currentCandidates: Set<String> = []
+    var capturedCandidates: Set<String> = []
     for candidate in candidates {
       try Task.checkCancellation()
-      var trail: [String] = []
-      var visitedPaths: Set<String> = []
-      var currentPath: String? = candidate.sourcePath
-      var isValid: Bool?
-      while let path = currentPath {
-        try Task.checkCancellation()
-        if let memoized = validityByPath[path] {
-          isValid = memoized
-          break
-        }
-        guard fingerprintIsCurrent[path] == true, visitedPaths.insert(path).inserted else {
-          isValid = false
-          break
-        }
-        trail.append(path)
-        guard let parentPath = parentPathByPath[path] else {
-          isValid = true
-          break
-        }
-        currentPath = parentPath
-      }
-      let resolvedValidity = isValid == true
-      for path in trail {
-        validityByPath[path] = resolvedValidity
-      }
-      if resolvedValidity {
-        currentCandidates.insert(candidate.sourcePath)
-      }
+      capturedCandidates.insert(candidate.sourcePath)
     }
-    return currentCandidates
+    return capturedCandidates
   }
 }
 
@@ -295,6 +259,14 @@ struct CodexTokenCounters: Hashable, Sendable {
     )
   }
 
+  func isAtLeast(_ other: Self) -> Bool {
+    input >= other.input && cached >= other.cached && output >= other.output
+  }
+
+  func isAtMost(_ other: Self) -> Bool {
+    input <= other.input && cached <= other.cached && output <= other.output
+  }
+
   func adding(_ other: Self) -> Self? {
     let (input, inputOverflow) = input.addingReportingOverflow(other.input)
     let (cached, cachedOverflow) = cached.addingReportingOverflow(other.cached)
@@ -332,19 +304,25 @@ struct CodexLineage: Sendable {
 }
 
 struct CodexUsageState {
+  private static let seenTotalsLimit = 64
+
+  private var countedTotals: CodexTokenCounters?
+  private var rawTotalsBaseline: CodexTokenCounters?
   private var watermark: CodexTokenCounters?
+  private var lineageRawWatermark: CodexTokenCounters?
+  private var seenRawTotals: [CodexTokenCounters] = []
   private var sawInterleavedTotals = false
+  private var sawDivergentTotals = false
   private var failed = false
   private let suppressUsage: Bool
-  private let hasInheritedBaseline: Bool
+  private let inheritedBaseline: CodexTokenCounters?
 
-  var currentWatermark: CodexTokenCounters? { watermark }
+  var currentWatermark: CodexTokenCounters? { lineageRawWatermark }
   var hasFailed: Bool { failed }
 
   init(lineage: CodexLineage?) {
-    watermark = lineage?.inheritedBaseline
+    inheritedBaseline = lineage?.inheritedBaseline
     suppressUsage = lineage?.suppressesUsage == true
-    hasInheritedBaseline = lineage?.inheritedBaseline != nil
   }
 
   mutating func consume(
@@ -352,28 +330,167 @@ struct CodexUsageState {
     last: CodexTokenCounters?
   ) -> CodexTokenCounters? {
     guard !suppressUsage, !failed else { return nil }
-    guard let total else {
-      guard !hasInheritedBaseline, let last else { return nil }
-      guard let nextWatermark = (watermark ?? .zero).adding(last) else {
-        failed = true
-        watermark = nil
+    if let total {
+      lineageRawWatermark = lineageRawWatermark?.componentwiseMaximum(with: total) ?? total
+    }
+    let adjustedTotal = total.map { value in
+      inheritedBaseline.map { value.positiveGrowth(from: $0) } ?? value
+    }
+    if let adjustedTotal {
+      if seenRawTotals.contains(adjustedTotal) {
         return nil
       }
-      watermark = nextWatermark
-      return last
+      if let watermark,
+        adjustedTotal.input < watermark.input || adjustedTotal.cached < watermark.cached
+          || adjustedTotal.output < watermark.output
+      {
+        sawInterleavedTotals = true
+      }
     }
-    let baseline = watermark ?? .zero
-    if total.input < baseline.input || total.cached < baseline.cached
-      || total.output < baseline.output
-    {
-      sawInterleavedTotals = true
+    let watermarkBaseline = watermark ?? rawTotalsBaseline
+    defer {
+      if let adjustedTotal {
+        watermark = watermark?.componentwiseMaximum(with: adjustedTotal) ?? adjustedTotal
+        if !seenRawTotals.contains(adjustedTotal) {
+          seenRawTotals.append(adjustedTotal)
+          if seenRawTotals.count > Self.seenTotalsLimit {
+            seenRawTotals.removeFirst(seenRawTotals.count - Self.seenTotalsLimit)
+          }
+        }
+      }
     }
-    var delta = total.positiveGrowth(from: baseline)
-    if sawInterleavedTotals, let last {
-      delta = delta.componentwiseMinimum(with: last)
+
+    let base = countedTotals ?? .zero
+    if let adjustedTotal, inheritedBaseline != nil {
+      var delta = totalsDerivedDelta(
+        current: adjustedTotal,
+        watermarkBaseline: watermarkBaseline
+      )
+      if sawInterleavedTotals, let last {
+        delta = delta.componentwiseMinimum(with: last)
+      }
+      return commit(delta: delta, current: adjustedTotal, base: base)
     }
-    watermark = baseline.componentwiseMaximum(with: total)
+
+    if let last {
+      var delta = last
+      if let adjustedTotal {
+        if sawInterleavedTotals {
+          delta = containedDelta(
+            current: adjustedTotal,
+            watermarkBaseline: watermarkBaseline
+          ).componentwiseMinimum(with: last)
+        } else {
+          let totalDelta = adjustedTotal.positiveGrowth(from: watermarkBaseline ?? .zero)
+          if !sawDivergentTotals,
+            let watermarkBaseline,
+            adjustedTotal.isAtLeast(watermarkBaseline),
+            totalDelta.isAtMost(last)
+          {
+            delta = totalDelta
+          }
+        }
+        return commit(delta: delta, current: adjustedTotal, base: base)
+      }
+      guard let counted = base.adding(delta) else {
+        fail()
+        return nil
+      }
+      countedTotals = counted
+      rawTotalsBaseline = counted
+      watermark = watermark?.componentwiseMaximum(with: counted) ?? counted
+      lineageRawWatermark = lineageRawWatermark?.componentwiseMaximum(with: counted) ?? counted
+      return delta
+    }
+
+    if let adjustedTotal {
+      let delta = totalsDerivedDelta(
+        current: adjustedTotal,
+        watermarkBaseline: watermarkBaseline
+      )
+      return commit(delta: delta, current: adjustedTotal, base: base)
+    }
+    return nil
+  }
+
+  private mutating func commit(
+    delta: CodexTokenCounters,
+    current: CodexTokenCounters,
+    base: CodexTokenCounters
+  ) -> CodexTokenCounters? {
+    guard let counted = base.adding(delta) else {
+      fail()
+      return nil
+    }
+    countedTotals = counted
+    rawTotalsBaseline = current
+    if counted != current {
+      sawDivergentTotals = true
+    }
     return delta
+  }
+
+  private func totalsDerivedDelta(
+    current: CodexTokenCounters,
+    watermarkBaseline: CodexTokenCounters?
+  ) -> CodexTokenCounters {
+    if sawInterleavedTotals {
+      return containedDelta(current: current, watermarkBaseline: watermarkBaseline)
+    }
+    if sawDivergentTotals {
+      let raw = watermarkBaseline ?? .zero
+      let counted = countedTotals ?? .zero
+      return Self.deltaFromDivergent(raw: raw, counted: counted, current: current)
+    }
+    return current.positiveGrowth(from: watermarkBaseline ?? .zero)
+  }
+
+  private func containedDelta(
+    current: CodexTokenCounters,
+    watermarkBaseline: CodexTokenCounters?
+  ) -> CodexTokenCounters {
+    let water = watermarkBaseline ?? .zero
+    let counted = countedTotals ?? .zero
+    return Self.deltaFromContained(water: water, counted: counted, current: current)
+  }
+
+  private static func deltaFromDivergent(
+    raw: CodexTokenCounters,
+    counted: CodexTokenCounters,
+    current: CodexTokenCounters
+  ) -> CodexTokenCounters {
+    func component(_ raw: Int, _ counted: Int, _ current: Int) -> Int {
+      current >= raw ? max(0, current - raw) : max(0, current - counted)
+    }
+    return CodexTokenCounters(
+      input: component(raw.input, counted.input, current.input),
+      cached: component(raw.cached, counted.cached, current.cached),
+      output: component(raw.output, counted.output, current.output)
+    )
+  }
+
+  private static func deltaFromContained(
+    water: CodexTokenCounters,
+    counted: CodexTokenCounters,
+    current: CodexTokenCounters
+  ) -> CodexTokenCounters {
+    func component(_ water: Int, _ counted: Int, _ current: Int) -> Int {
+      current >= water
+        ? max(0, current - max(water, counted))
+        : max(0, current - counted)
+    }
+    return CodexTokenCounters(
+      input: component(water.input, counted.input, current.input),
+      cached: component(water.cached, counted.cached, current.cached),
+      output: component(water.output, counted.output, current.output)
+    )
+  }
+
+  private mutating func fail() {
+    failed = true
+    countedTotals = nil
+    watermark = nil
+    lineageRawWatermark = nil
   }
 }
 
@@ -406,7 +523,9 @@ private enum CodexLineageIndex {
     let fingerprint: CodexFileFingerprint
     var sessionID: String?
     var parentSessionID: String?
+    var hasObservedMetadata = false
     var hasEmbeddedAncestorMetadata = false
+    var isSubagentThread = false
     var forkTimestamp: Date?
     var historicalSnapshots: [CodexLineageSnapshot] = []
     var usageState = CodexUsageState(lineage: nil)
@@ -432,6 +551,17 @@ private enum CodexLineageIndex {
     let last: CodexTokenCounters?
     let explicitEventID: String?
     let localBaseline: CodexTokenCounters?
+  }
+
+  private struct ParsedTokenLine {
+    let event: ParsedTokenEvent
+    let lineNumber: Int
+  }
+
+  private struct LocalBoundaryCandidate {
+    let startLineNumber: Int
+    let baseline: CodexTokenCounters
+    var isLocallyConfirmed = false
   }
 
   private struct ParentSnapshotEvidence {
@@ -694,8 +824,6 @@ private enum CodexLineageIndex {
       lineage: lineageByPath,
       candidates: candidates,
       diagnostics: diagnostics,
-      fingerprintsByPath: filesByPath.mapValues(\.fingerprint),
-      parentPathByPath: parentPathByPath,
       retentionMetrics: CodexRetentionMetrics(
         scannedFileCount: filesByPath.count,
         retainedFingerprintCount: filesByPath.count,
@@ -809,6 +937,10 @@ private enum CodexLineageIndex {
     var session = SessionFile(fingerprint: discovered.fingerprint)
     var currentModel: String?
     var retainedEvents: [CodexRetainedUsageEvent] = []
+    var parsedTokenLines: [ParsedTokenLine] = []
+    var lastRawTotals: CodexTokenCounters?
+    var pendingBoundary: (lineNumber: Int, baseline: CodexTokenCounters)?
+    var boundaryCandidate: LocalBoundaryCandidate?
     var diagnostics: [LocalLogDiagnostic] = []
     do {
       onDeepScan(discovered.file.url)
@@ -819,6 +951,7 @@ private enum CodexLineageIndex {
           CodexLogScanner.turnContextMarker,
           CodexLogScanner.tokenCountMarker,
           CodexLogScanner.sessionMetadataMarker,
+          CodexLogScanner.interAgentMarker,
         ]
       ) { data, lineNumber in
         onDeepScanLine(data, lineNumber)
@@ -826,7 +959,7 @@ private enum CodexLineageIndex {
           let object = try? JSONSerialization.jsonObject(with: data),
           let dictionary = object as? [String: Any]
         else {
-          if retainCandidateEvents {
+          if retainCandidateEvents, !data.isEmpty {
             diagnostics.append(
               .malformedLine(file: discovered.file.url.lastPathComponent, line: lineNumber)
             )
@@ -834,14 +967,41 @@ private enum CodexLineageIndex {
           return
         }
         if dictionary["type"] as? String == "session_meta" {
+          let hadEmbeddedAncestor = session.hasEmbeddedAncestorMetadata
           observeMetadata(dictionary, in: &session, timestampParser: timestampParser)
+          if !hadEmbeddedAncestor, session.hasEmbeddedAncestorMetadata {
+            pendingBoundary = nil
+            boundaryCandidate = nil
+          }
           return
         }
-        if dictionary["type"] as? String == "turn_context",
-          let payload = dictionary["payload"] as? [String: Any],
-          let model = payload["model"] as? String
-        {
-          currentModel = model
+        if dictionary["type"] as? String == "turn_context" {
+          let payload = dictionary["payload"] as? [String: Any]
+          if let model = payload?["model"] as? String {
+            currentModel = model
+          }
+          pendingBoundary =
+            if session.isSubagentThread, let lastRawTotals {
+              (lineNumber, lastRawTotals)
+            } else {
+              nil
+            }
+          return
+        }
+        if dictionary["type"] as? String == "inter_agent_communication_metadata" {
+          let payload = dictionary["payload"] as? [String: Any]
+          if boundaryCandidate == nil,
+            payload?["trigger_turn"] as? Bool == true,
+            let pendingBoundary,
+            lineNumber == pendingBoundary.lineNumber + 1,
+            !pendingBoundary.baseline.isZero
+          {
+            boundaryCandidate = LocalBoundaryCandidate(
+              startLineNumber: pendingBoundary.lineNumber,
+              baseline: pendingBoundary.baseline
+            )
+          }
+          pendingBoundary = nil
           return
         }
         guard
@@ -853,6 +1013,31 @@ private enum CodexLineageIndex {
         else {
           return
         }
+        if var candidate = boundaryCandidate,
+          !candidate.isLocallyConfirmed,
+          event.localBaseline == candidate.baseline
+        {
+          candidate.isLocallyConfirmed = true
+          boundaryCandidate = candidate
+        }
+        parsedTokenLines.append(ParsedTokenLine(event: event, lineNumber: lineNumber))
+        lastRawTotals = event.total
+        pendingBoundary = nil
+      }
+
+      let acceptedBoundary = boundaryCandidate.flatMap { candidate in
+        candidate.isLocallyConfirmed || session.hasEmbeddedAncestorMetadata ? candidate : nil
+      }
+      session.usageState = CodexUsageState(
+        lineage: acceptedBoundary.map {
+          CodexLineage(inheritedBaseline: $0.baseline, isUnresolvedFork: false)
+        }
+      )
+      for parsedLine in parsedTokenLines
+      where
+        acceptedBoundary.map({ parsedLine.lineNumber >= $0.startLineNumber }) ?? true
+      {
+        let event = parsedLine.event
         let snapshot = lineageSnapshot(for: event, in: &session)
         if retainCandidateEvents {
           retainedEvents.append(
@@ -863,7 +1048,7 @@ private enum CodexLineageIndex {
               total: event.total,
               last: event.last,
               explicitEventID: event.explicitEventID,
-              lineNumber: lineNumber,
+              lineNumber: parsedLine.lineNumber,
               lineageTotals: snapshot?.totals,
               localBaseline: event.localBaseline
             )
@@ -946,11 +1131,12 @@ private enum CodexLineageIndex {
     timestampParser: TimestampParser
   ) {
     let payload = object["payload"] as? [String: Any] ?? [:]
+    session.isSubagentThread = session.isSubagentThread || isSubagentSource(payload["source"])
     let metadataID = sessionIdentifier(payload: payload, object: object)
-    if session.sessionID == nil {
+    if !session.hasObservedMetadata {
+      session.hasObservedMetadata = true
       session.sessionID = metadataID
-    }
-    guard metadataID == nil || metadataID == session.sessionID else {
+    } else if metadataID != session.sessionID {
       session.hasEmbeddedAncestorMetadata = true
       return
     }
@@ -962,6 +1148,14 @@ private enum CodexLineageIndex {
       )
     let timestamp = payload["timestamp"] as? String ?? object["timestamp"] as? String
     session.forkTimestamp = session.forkTimestamp ?? timestamp.flatMap(timestampParser.parse)
+  }
+
+  private static func isSubagentSource(_ source: Any?) -> Bool {
+    if let source = source as? String {
+      return source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "subagent"
+    }
+    guard let source = source as? [String: Any] else { return false }
+    return source["subagent"] is String || source["subagent"] is [String: Any]
   }
 
   private static func lineageSnapshot(

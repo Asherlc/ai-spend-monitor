@@ -1,5 +1,5 @@
 {
-  "version": "2026-07-27",
+  "version": "2026-08-06",
   "currency": "USD",
   "models": {
     "claude-sonnet-4-5": {
@@ -49,9 +49,9 @@
       "sourceURL": "https://developers.openai.com/api/docs/models/gpt-5.3-codex"
     },
     "codex-auto-review": {
-      "inputPerMillion": "1.75",
-      "cachedInputPerMillion": "0.175",
-      "outputPerMillion": "14.00",
+      "inputPerMillion": "0",
+      "cachedInputPerMillion": "0",
+      "outputPerMillion": "0",
       "sourceURL": "https://help.openai.com/en/articles/20001106-codex-rate-card"
     },
     "gpt-5.4": {
