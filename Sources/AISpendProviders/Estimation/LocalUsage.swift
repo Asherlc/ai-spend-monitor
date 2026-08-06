@@ -307,6 +307,34 @@ struct LocalLogScanner {
     relativeTo root: URL,
     process: (Data, Int) -> Void
   ) throws {
+    try scanFileImpl(
+      file: file,
+      relativeTo: root,
+      markerBytes: nil,
+      process: process
+    )
+  }
+
+  static func scanFile(
+    file: URL,
+    relativeTo root: URL,
+    markerBytes: [Data],
+    process: (Data, Int) -> Void
+  ) throws {
+    try scanFileImpl(
+      file: file,
+      relativeTo: root,
+      markerBytes: markerBytes,
+      process: process
+    )
+  }
+
+  private static func scanFileImpl(
+    file: URL,
+    relativeTo root: URL,
+    markerBytes: [Data]?,
+    process: (Data, Int) -> Void
+  ) throws {
     let rootComponents = root.standardizedFileURL.pathComponents
     let fileComponents = file.standardizedFileURL.pathComponents
     guard fileComponents.starts(with: rootComponents) else {
@@ -330,9 +358,13 @@ struct LocalLogScanner {
         if discardingOversizedLine {
           lineNumber += 1
           process(Data(), lineNumber)
+          try Task.checkCancellation()
         } else if !buffer.isEmpty {
           lineNumber += 1
-          process(buffer, lineNumber)
+          if shouldProcess(buffer, markerBytes: markerBytes) {
+            process(buffer, lineNumber)
+            try Task.checkCancellation()
+          }
         }
         break
       }
@@ -341,13 +373,16 @@ struct LocalLogScanner {
       while lineStart < buffer.endIndex,
         let newline = buffer[lineStart...].firstIndex(of: 0x0A)
       {
+        try Task.checkCancellation()
         lineNumber += 1
         let line = buffer[lineStart..<newline]
         if discardingOversizedLine {
           discardingOversizedLine = false
           process(Data(), lineNumber)
-        } else if !line.isEmpty {
+          try Task.checkCancellation()
+        } else if shouldProcess(line, markerBytes: markerBytes) {
           process(Data(line), lineNumber)
+          try Task.checkCancellation()
         }
         lineStart = buffer.index(after: newline)
       }
@@ -359,6 +394,12 @@ struct LocalLogScanner {
         buffer.removeAll(keepingCapacity: true)
       }
     }
+  }
+
+  private static func shouldProcess(_ line: Data, markerBytes: [Data]?) -> Bool {
+    guard !line.isEmpty else { return false }
+    guard let markerBytes else { return true }
+    return markerBytes.contains { line.range(of: $0) != nil }
   }
 
   static func readFilePrefix(

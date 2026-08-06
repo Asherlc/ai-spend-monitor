@@ -8,6 +8,7 @@ public struct CodexLogScanner: Sendable {
   private let beforeLineageScan: @Sendable () throws -> Void
   private let afterLineageScan: @Sendable () throws -> Void
   private let onFullFileScan: @Sendable (URL) -> Void
+  private let onDeepScanLine: @Sendable (Data, Int) -> Void
   private let onRetentionMetrics: @Sendable (CodexRetentionMetrics) -> Void
 
   public init(
@@ -29,6 +30,7 @@ public struct CodexLogScanner: Sendable {
     beforeLineageScan: @escaping @Sendable () throws -> Void = {},
     afterLineageScan: @escaping @Sendable () throws -> Void = {},
     onFullFileScan: @escaping @Sendable (URL) -> Void = { _ in },
+    onDeepScanLine: @escaping @Sendable (Data, Int) -> Void = { _, _ in },
     onRetentionMetrics: @escaping @Sendable (CodexRetentionMetrics) -> Void = { _ in }
   ) {
     self.sessionRoots = sessionRoots
@@ -37,6 +39,7 @@ public struct CodexLogScanner: Sendable {
     self.beforeLineageScan = beforeLineageScan
     self.afterLineageScan = afterLineageScan
     self.onFullFileScan = onFullFileScan
+    self.onDeepScanLine = onDeepScanLine
     self.onRetentionMetrics = onRetentionMetrics
   }
 
@@ -51,7 +54,8 @@ public struct CodexLogScanner: Sendable {
     let build = try CodexLineageIndex.build(
       sessionRoots: sessionRoots,
       candidateFiles: files,
-      onDeepScan: onFullFileScan
+      onDeepScan: onFullFileScan,
+      onDeepScanLine: onDeepScanLine
     )
     onRetentionMetrics(build.retentionMetrics)
     try afterLineageScan()
@@ -457,7 +461,8 @@ private enum CodexLineageIndex {
   static func build(
     sessionRoots: [URL],
     candidateFiles: [LocalLogFile],
-    onDeepScan: @Sendable (URL) -> Void
+    onDeepScan: @Sendable (URL) -> Void,
+    onDeepScanLine: @Sendable (Data, Int) -> Void
   ) throws -> CodexLineageBuild {
     let timestampParser = TimestampParser()
     let canonicalCandidates = canonicalFiles(candidateFiles)
@@ -521,7 +526,8 @@ private enum CodexLineageIndex {
         discovered,
         timestampParser: timestampParser,
         retainCandidateEvents: true,
-        onDeepScan: onDeepScan
+        onDeepScan: onDeepScan,
+        onDeepScanLine: onDeepScanLine
       ) {
         filesByPath[path] = result.session
         retainedCandidatesByPath[path] = CodexRetainedCandidate(
@@ -559,7 +565,8 @@ private enum CodexLineageIndex {
           discovered,
           timestampParser: timestampParser,
           retainCandidateEvents: false,
-          onDeepScan: onDeepScan
+          onDeepScan: onDeepScan,
+          onDeepScanLine: onDeepScanLine
         )
       else {
         continue
@@ -797,7 +804,8 @@ private enum CodexLineageIndex {
     _ discovered: DiscoveredFile,
     timestampParser: TimestampParser,
     retainCandidateEvents: Bool,
-    onDeepScan: @Sendable (URL) -> Void
+    onDeepScan: @Sendable (URL) -> Void,
+    onDeepScanLine: @Sendable (Data, Int) -> Void
   ) throws -> DeepScanResult? {
     var session = SessionFile(fingerprint: discovered.fingerprint)
     var currentModel: String?
@@ -807,27 +815,19 @@ private enum CodexLineageIndex {
       onDeepScan(discovered.file.url)
       try LocalLogScanner.scanFile(
         file: discovered.file.url,
-        relativeTo: discovered.file.root
+        relativeTo: discovered.file.root,
+        markerBytes: [
+          CodexLogScanner.turnContextMarker,
+          CodexLogScanner.tokenCountMarker,
+          CodexLogScanner.sessionMetadataMarker,
+        ]
       ) { data, lineNumber in
-        let containsTurnContext =
-          data.range(of: CodexLogScanner.turnContextMarker) != nil
-        let containsTokenCount =
-          data.range(of: CodexLogScanner.tokenCountMarker) != nil
-        let containsSessionMetadata =
-          data.range(of: CodexLogScanner.sessionMetadataMarker) != nil
-        let isCandidateLine =
-          data.isEmpty || containsTurnContext || containsTokenCount || containsSessionMetadata
-        guard
-          containsTokenCount || containsSessionMetadata
-            || (retainCandidateEvents && isCandidateLine)
-        else {
-          return
-        }
+        onDeepScanLine(data, lineNumber)
         guard
           let object = try? JSONSerialization.jsonObject(with: data),
           let dictionary = object as? [String: Any]
         else {
-          if retainCandidateEvents && isCandidateLine {
+          if retainCandidateEvents {
             diagnostics.append(
               .malformedLine(file: discovered.file.url.lastPathComponent, line: lineNumber)
             )

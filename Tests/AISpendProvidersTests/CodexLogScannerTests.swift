@@ -5,6 +5,57 @@ import XCTest
 @testable import AISpendProviders
 
 final class CodexLogScannerTests: XCTestCase {
+  func testFilteredStreamingSkipsIrrelevantLineAndPreservesRelevantLineNumbers() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("filtered.jsonl")
+    let lines = [
+      String(repeating: "x", count: 65_536),
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ]
+    try writeCodexSession(to: file, lines: lines)
+    let recorder = CodexDeepScanLineRecorder()
+
+    let result = try scanCodexRoot(
+      root,
+      onDeepScanLine: { _, lineNumber in
+        recorder.record(lineNumber)
+      })
+
+    XCTAssertEqual(recorder.lineNumbers, [2, 3])
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 100)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testFilteredStreamingRethrowsCancellationDuringDeliveredLine() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("cancel.jsonl")
+    try writeCodexSession(
+      to: file,
+      lines: [#"{"type":"turn_context"}"#, #"{"type":"token_count"}"#]
+    )
+    let task = Task {
+      try LocalLogScanner.scanFile(
+        file: file,
+        relativeTo: root,
+        markerBytes: [Data(#""turn_context""#.utf8), Data(#""token_count""#.utf8)]
+      ) { _, _ in
+        withUnsafeCurrentTask { $0?.cancel() }
+      }
+    }
+
+    do {
+      try await task.value
+      XCTFail("Expected cancellation")
+    } catch is CancellationError {
+      XCTAssertTrue(true)
+    } catch {
+      XCTFail("Expected CancellationError, got \(error)")
+    }
+  }
+
   func testCumulativeTotalReconcilesEarlierLastOnlyUsage() throws {
     let result = try scanCodexLines([
       #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
@@ -834,7 +885,10 @@ private func scanCodexLines(_ lines: [String]) throws -> LocalLogScanResult {
   return try scanCodexRoot(root)
 }
 
-private func scanCodexRoot(_ root: URL) throws -> LocalLogScanResult {
+private func scanCodexRoot(
+  _ root: URL,
+  onDeepScanLine: @escaping @Sendable (Data, Int) -> Void = { _, _ in }
+) throws -> LocalLogScanResult {
   let calendar = utcCalendar()
   let window = try MonthWindow.current(
     containing: isoDate("2026-06-15T00:00:00Z"),
@@ -843,7 +897,8 @@ private func scanCodexRoot(_ root: URL) throws -> LocalLogScanResult {
   return try CodexLogScanner(
     sessionRoots: [root],
     priceCatalog: try PriceCatalog.bundled(),
-    calendar: calendar
+    calendar: calendar,
+    onDeepScanLine: onDeepScanLine
   ).scan(window: window, fetchedAt: window.end)
 }
 
@@ -861,6 +916,19 @@ private final class CodexDeepScanRecorder: @unchecked Sendable {
 
   func count(for fileName: String) -> Int {
     lock.withLock { recordedFileNames.count { $0 == fileName } }
+  }
+}
+
+private final class CodexDeepScanLineRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedLineNumbers: [Int] = []
+
+  var lineNumbers: [Int] {
+    lock.withLock { recordedLineNumbers }
+  }
+
+  func record(_ lineNumber: Int) {
+    lock.withLock { recordedLineNumbers.append(lineNumber) }
   }
 }
 
