@@ -57,6 +57,7 @@ public struct OpenAIAdapter: ProviderAdapter {
     var refreshedSourceIDs = Set<String>()
     var resolvedCredential: Secret?
     var modelLessCoverage: [(Date, Date)] = []
+    var coverage = ProviderDataCoverage.complete
     let accountFingerprint: String
     do {
       resolvedCredential = try credential()
@@ -131,6 +132,9 @@ public struct OpenAIAdapter: ProviderAdapter {
           try Self.reaccount($0, accountFingerprint: accountFingerprint)
         }
       )
+      if !result.diagnostics.isEmpty {
+        coverage = .partial(message: "Some Codex local spend is unavailable.")
+      }
       refreshedSourceIDs.insert("openai-local-logs")
       attempts.append(
         .init(
@@ -153,7 +157,8 @@ public struct OpenAIAdapter: ProviderAdapter {
       records: records,
       attempts: attempts,
       refreshedSourceIDs: refreshedSourceIDs,
-      fetchedAt: fetchedAt
+      fetchedAt: fetchedAt,
+      coverage: coverage
     )
   }
 

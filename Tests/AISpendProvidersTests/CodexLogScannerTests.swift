@@ -24,7 +24,7 @@ final class CodexLogScannerTests: XCTestCase {
     ])
 
     XCTAssertTrue(result.records.isEmpty)
-    XCTAssertTrue(result.diagnostics.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "session.jsonl")])
   }
 
   func testInterleavedCounterGrowthIsContainedByHighWatermark() throws {
@@ -324,7 +324,7 @@ final class CodexLogScannerTests: XCTestCase {
     let result = try scanCodexRoot(root)
 
     XCTAssertTrue(result.records.isEmpty)
-    XCTAssertTrue(result.diagnostics.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
   }
 
   func testDuplicateParentIdentifierBeyondMetadataPrefixFailsClosed() throws {
@@ -359,7 +359,7 @@ final class CodexLogScannerTests: XCTestCase {
     let result = try scanCodexRoot(root)
 
     XCTAssertTrue(result.records.isEmpty)
-    XCTAssertTrue(result.diagnostics.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
   }
 
   func testCumulativeChildResolvesLastOnlyParentBaseline() throws {
@@ -410,7 +410,7 @@ final class CodexLogScannerTests: XCTestCase {
     let result = try scanCodexRoot(root)
 
     XCTAssertTrue(result.records.isEmpty)
-    XCTAssertTrue(result.diagnostics.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
   }
 
   func testScanUsesStableCandidateSnapshotAcrossLineageBoundary() throws {
@@ -459,7 +459,7 @@ final class CodexLogScannerTests: XCTestCase {
     let result = try scanner.scan(window: window, fetchedAt: window.end)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
-    XCTAssertTrue(result.diagnostics.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "changed.jsonl")])
   }
 
   func testCandidateMissingDuringLineageScanFailsClosedIfRecreatedBeforeBilling() throws {
@@ -498,7 +498,7 @@ final class CodexLogScannerTests: XCTestCase {
     let result = try scanner.scan(window: window, fetchedAt: window.end)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
-    XCTAssertTrue(result.diagnostics.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "recreated.jsonl")])
   }
 
   func testSkipsIrrelevantLinesBeforeJSONDecoding() throws {

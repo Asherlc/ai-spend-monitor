@@ -80,6 +80,39 @@ final class OpenAIAdapterTests: XCTestCase {
       ])
   }
 
+  func testCodexDiagnosticMarksCoveragePartialWithoutDiscardingLocalResults() async throws {
+    let estimate = try makeSpendRecord(
+      provider: .openAI,
+      model: "gpt-5.3-codex",
+      amount: 3,
+      quality: .estimated
+    )
+    let adapter = OpenAIAdapter(
+      credential: { Secret("admin") },
+      actual: { _, _ in [] },
+      local: { _, _ in
+        LocalLogScanResult(
+          records: [estimate],
+          diagnostics: [.sourceUnavailable(file: "private-session-name.jsonl")]
+        )
+      },
+      now: { juneDate() }
+    )
+
+    let result = try await adapter.fetch(window: juneWindow())
+
+    XCTAssertEqual(
+      result.coverage,
+      .partial(message: "Some Codex local spend is unavailable.")
+    )
+    XCTAssertEqual(result.records.map(\.amount), [Money(3)])
+    XCTAssertEqual(
+      result.refreshedSourceIDs,
+      ["openai-local-logs", "openai-organization-costs"]
+    )
+    XCTAssertEqual(result.attempts.last?.outcome, .succeeded(recordCount: 1))
+  }
+
   func testOfficialModelLessCostCoverageSuppressesOnlyOverlappingLocalModels() async throws {
     let dayOneEnd = juneWindow().start.addingTimeInterval(86_400)
     let dayTwoEnd = dayOneEnd.addingTimeInterval(86_400)

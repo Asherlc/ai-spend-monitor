@@ -51,7 +51,7 @@ public struct CodexLogScanner: Sendable {
       onDeepScan: onLineageDeepScan
     )
     try afterLineageScan()
-    return try LocalLogScanner(
+    let result = try LocalLogScanner(
       provider: .openAI,
       sessionRoots: sessionRoots,
       priceCatalog: priceCatalog,
@@ -69,6 +69,21 @@ public struct CodexLogScanner: Sendable {
       fetchedAt: fetchedAt,
       files: files,
       initialDiagnostics: diagnostics
+    )
+    let suppressedDiagnostics = files.compactMap { file -> LocalLogDiagnostic? in
+      let path = file.url.resolvingSymlinksInPath().path
+      guard lineage[path]?.suppressesUsage == true else { return nil }
+      return .sourceUnavailable(file: file.url.lastPathComponent)
+    }
+    var combinedDiagnostics = result.diagnostics
+    for diagnostic in suppressedDiagnostics where !combinedDiagnostics.contains(diagnostic) {
+      combinedDiagnostics.append(diagnostic)
+    }
+    return LocalLogScanResult(
+      records: result.records,
+      diagnostics: combinedDiagnostics.sorted {
+        String(describing: $0) < String(describing: $1)
+      }
     )
   }
 
@@ -223,6 +238,10 @@ struct CodexLineage: Sendable {
   let inheritedBaseline: CodexTokenCounters?
   let isUnresolvedFork: Bool
   let fingerprints: [CodexFileFingerprint]
+
+  var suppressesUsage: Bool {
+    isUnresolvedFork || !fingerprints.allSatisfy { $0.isCurrent() }
+  }
 }
 
 struct CodexUsageState {
@@ -237,9 +256,7 @@ struct CodexUsageState {
 
   init(lineage: CodexLineage?) {
     watermark = lineage?.inheritedBaseline
-    suppressUsage =
-      lineage?.isUnresolvedFork == true
-      || lineage?.fingerprints.allSatisfy({ $0.isCurrent() }) == false
+    suppressUsage = lineage?.suppressesUsage == true
     hasInheritedBaseline = lineage?.inheritedBaseline != nil
   }
 
