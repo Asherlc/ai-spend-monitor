@@ -566,6 +566,7 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
     let calendar = utcCalendar()
+    let retentionRecorder = CodexRetentionMetricsRecorder()
     let window = try MonthWindow.current(
       containing: isoDate("2026-06-15T00:00:00Z"),
       calendar: calendar
@@ -577,11 +578,20 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar,
       afterLineageScan: {
         try appendCodexLine(#"{"type":"changed"}"#, to: grandparent)
-      }
+      },
+      onRetentionMetrics: { retentionRecorder.record($0) }
     ).scan(window: window, fetchedAt: window.end)
 
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
+    XCTAssertEqual(
+      retentionRecorder.metrics,
+      CodexRetentionMetrics(
+        scannedFileCount: 3,
+        retainedFingerprintCount: 3,
+        materializedCandidateSnapshotCount: 0
+      )
+    )
   }
 
   func testCandidateMissingDuringLineageScanFailsClosedIfRecreatedBeforeBilling() throws {
@@ -851,6 +861,19 @@ private final class CodexDeepScanRecorder: @unchecked Sendable {
 
   func count(for fileName: String) -> Int {
     lock.withLock { recordedFileNames.count { $0 == fileName } }
+  }
+}
+
+private final class CodexRetentionMetricsRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedMetrics: CodexRetentionMetrics?
+
+  var metrics: CodexRetentionMetrics? {
+    lock.withLock { recordedMetrics }
+  }
+
+  func record(_ metrics: CodexRetentionMetrics) {
+    lock.withLock { recordedMetrics = metrics }
   }
 }
 
