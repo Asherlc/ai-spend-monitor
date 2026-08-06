@@ -794,8 +794,7 @@ private enum CodexLineageIndex {
         continue
       }
       let payload = object["payload"] as? [String: Any] ?? [:]
-      return identifier(in: payload, keys: ["session_id", "sessionId", "id"])
-        ?? identifier(in: object, keys: ["session_id", "sessionId", "id"])
+      return sessionIdentifier(payload: payload, object: object)
     }
     return nil
   }
@@ -947,9 +946,7 @@ private enum CodexLineageIndex {
     timestampParser: TimestampParser
   ) {
     let payload = object["payload"] as? [String: Any] ?? [:]
-    let metadataID =
-      identifier(in: payload, keys: ["session_id", "sessionId", "id"])
-      ?? identifier(in: object, keys: ["session_id", "sessionId", "id"])
+    let metadataID = sessionIdentifier(payload: payload, object: object)
     if session.sessionID == nil {
       session.sessionID = metadataID
     }
@@ -1008,6 +1005,16 @@ private enum CodexLineageIndex {
       return nil
     }
     return identifier(in: spawn, keys: ["parent_thread_id", "parentThreadId"])
+  }
+
+  private static func sessionIdentifier(
+    payload: [String: Any],
+    object: [String: Any]
+  ) -> String? {
+    identifier(in: payload, keys: ["id"])
+      ?? identifier(in: object, keys: ["id"])
+      ?? identifier(in: payload, keys: ["session_id", "sessionId"])
+      ?? identifier(in: object, keys: ["session_id", "sessionId"])
   }
 
   private static func identifier(in object: [String: Any], keys: [String]) -> String? {
