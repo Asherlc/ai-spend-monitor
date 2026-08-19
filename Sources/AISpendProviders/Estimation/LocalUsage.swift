@@ -305,12 +305,14 @@ struct LocalLogScanner {
   static func scanFile(
     file: URL,
     relativeTo root: URL,
+    cancellationCheck: @Sendable () throws -> Void = { try Task.checkCancellation() },
     process: (Data, Int) -> Void
   ) throws {
     try scanFileImpl(
       file: file,
       relativeTo: root,
       markerBytes: nil,
+      cancellationCheck: cancellationCheck,
       process: process
     )
   }
@@ -320,6 +322,7 @@ struct LocalLogScanner {
     relativeTo root: URL,
     markerBytes: [Data],
     onLineSearchBytes: ((Int) -> Void)? = nil,
+    cancellationCheck: @Sendable () throws -> Void = { try Task.checkCancellation() },
     process: (Data, Int) -> Void
   ) throws {
     try scanFileImpl(
@@ -327,6 +330,7 @@ struct LocalLogScanner {
       relativeTo: root,
       markerBytes: markerBytes,
       onLineSearchBytes: onLineSearchBytes,
+      cancellationCheck: cancellationCheck,
       process: process
     )
   }
@@ -336,6 +340,7 @@ struct LocalLogScanner {
     relativeTo root: URL,
     markerBytes: [Data]?,
     onLineSearchBytes: ((Int) -> Void)? = nil,
+    cancellationCheck: @Sendable () throws -> Void,
     process: (Data, Int) -> Void
   ) throws {
     let rootComponents = root.standardizedFileURL.pathComponents
@@ -355,7 +360,7 @@ struct LocalLogScanner {
     let maximumLineBytes = 1_048_576
 
     while true {
-      try Task.checkCancellation()
+      try cancellationCheck()
       let chunk = try handle.read(upToCount: 65_536) ?? Data()
       if chunk.isEmpty {
         if discardingOversizedLine {
@@ -363,12 +368,12 @@ struct LocalLogScanner {
           if markerBytes == nil {
             process(Data(), lineNumber)
           }
-          try Task.checkCancellation()
+          try cancellationCheck()
         } else if !buffer.isEmpty {
           lineNumber += 1
           if shouldProcess(buffer, markerBytes: markerBytes) {
             process(buffer, lineNumber)
-            try Task.checkCancellation()
+            try cancellationCheck()
           }
         }
         break
@@ -383,7 +388,7 @@ struct LocalLogScanner {
         if markerBytes == nil {
           process(Data(), lineNumber)
         }
-        try Task.checkCancellation()
+        try cancellationCheck()
         buffer.append(contentsOf: chunk[chunk.index(after: newline)...])
       } else {
         buffer.append(chunk)
@@ -393,7 +398,7 @@ struct LocalLogScanner {
         let remainingLine = buffer[lineStart...]
         onLineSearchBytes?(remainingLine.count)
         guard let newline = remainingLine.firstIndex(of: 0x0A) else { break }
-        try Task.checkCancellation()
+        try cancellationCheck()
         lineNumber += 1
         let line = buffer[lineStart..<newline]
         if discardingOversizedLine {
@@ -401,10 +406,10 @@ struct LocalLogScanner {
           if markerBytes == nil {
             process(Data(), lineNumber)
           }
-          try Task.checkCancellation()
+          try cancellationCheck()
         } else if shouldProcess(line, markerBytes: markerBytes) {
           process(Data(line), lineNumber)
-          try Task.checkCancellation()
+          try cancellationCheck()
         }
         lineStart = buffer.index(after: newline)
       }

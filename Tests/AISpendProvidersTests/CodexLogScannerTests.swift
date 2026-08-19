@@ -36,6 +36,49 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
+  func testCandidateAndHistoricalDeepScansLeaveCooperativeTaskExecutor() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let parent = root.appendingPathComponent("old-parent.jsonl")
+    try writeCodexSession(
+      to: parent,
+      lines: [
+        #"{"timestamp":"2026-05-31T10:44:00Z","type":"session_meta","payload":{"id":"old-parent"}}"#,
+        #"{"timestamp":"2026-05-31T10:45:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try setModificationDate(parent, to: isoDate("2026-05-31T12:00:00Z"))
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child","forked_from_id":"old-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let recorder = CodexExecutorIsolationRecorder()
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try await CodexScanTaskContext.$marker.withValue(true) {
+      try await CodexLogScanner(
+        sessionRoots: [root],
+        priceCatalog: try PriceCatalog.bundled(),
+        calendar: calendar,
+        onFullFileScan: { recorder.record($0) }
+      ).scan(window: window, fetchedAt: window.end)
+    }
+
+    XCTAssertEqual(recorder.fileNames.sorted(), ["child.jsonl", "old-parent.jsonl"])
+    XCTAssertTrue(recorder.cooperativeTaskFileNames.isEmpty)
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
   func testOversizedIrrelevantLineConsumesSearchBudgetLinearlyAndPreservesUsage() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -119,6 +162,84 @@ final class CodexLogScannerTests: XCTestCase {
     } catch {
       XCTFail("Expected CancellationError, got \(error)")
     }
+  }
+
+  func testFilteredStreamingUsesExternalCancellationCheckAtLineBoundary() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("external-cancel.jsonl")
+    try writeCodexSession(
+      to: file,
+      lines: [#"{"type":"turn_context"}"#, #"{"type":"token_count"}"#]
+    )
+    let cancellation = CodexManualCancellationCheck()
+    let recorder = CodexDeepScanLineRecorder()
+
+    XCTAssertThrowsError(
+      try LocalLogScanner.scanFile(
+        file: file,
+        relativeTo: root,
+        markerBytes: [Data(#""turn_context""#.utf8), Data(#""token_count""#.utf8)],
+        cancellationCheck: { try cancellation.check() }
+      ) { _, lineNumber in
+        recorder.record(lineNumber)
+        cancellation.cancel()
+      }
+    ) { error in
+      XCTAssertTrue(error is CancellationError)
+    }
+    XCTAssertEqual(recorder.lineNumbers, [1])
+  }
+
+  func testCancellationStopsInFlightAndQueuedCandidateScans() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    for index in 0..<12 {
+      try writeCodexSession(
+        to: root.appendingPathComponent("candidate-\(index).jsonl"),
+        lines: [
+          #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+          #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        ]
+      )
+    }
+    let recorder = CodexCancellationRecorder()
+    let cancellation = CodexScanCancellationController()
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+    let scanner = CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar,
+      onFullFileScan: { file in
+        if recorder.recordStart(file) {
+          cancellation.cancelAndWaitUntilApplied()
+        } else {
+          cancellation.waitUntilApplied()
+        }
+      },
+      onDeepScanLine: { _, _ in recorder.recordLine() }
+    )
+    let task = Task {
+      try await scanner.scan(window: window, fetchedAt: window.end)
+    }
+    cancellation.install { task.cancel() }
+
+    do {
+      _ = try await task.value
+      XCTFail("Expected cancellation")
+    } catch is CancellationError {
+      XCTAssertTrue(true)
+    } catch {
+      XCTFail("Expected CancellationError, got \(error)")
+    }
+
+    XCTAssertGreaterThan(recorder.startedFileCount, 0)
+    XCTAssertLessThanOrEqual(recorder.startedFileCount, 8)
+    XCTAssertEqual(recorder.lineCount, 0)
   }
 
   func testCumulativeTotalReconcilesEarlierLastOnlyUsage() async throws {
@@ -1281,6 +1402,120 @@ private final class CodexConcurrentScanRecorder: @unchecked Sendable {
     }
     Thread.sleep(forTimeInterval: 0.05)
     lock.withLock { activeScans -= 1 }
+  }
+}
+
+private enum CodexScanTaskContext {
+  @TaskLocal static var marker = false
+}
+
+private final class CodexExecutorIsolationRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedFileNames: [String] = []
+  private var recordedCooperativeTaskFileNames: [String] = []
+
+  var fileNames: [String] {
+    lock.withLock { recordedFileNames }
+  }
+
+  var cooperativeTaskFileNames: [String] {
+    lock.withLock { recordedCooperativeTaskFileNames }
+  }
+
+  func record(_ file: URL) {
+    let fileName = file.lastPathComponent
+    let hasTaskMarker = CodexScanTaskContext.marker
+    lock.withLock {
+      recordedFileNames.append(fileName)
+      if hasTaskMarker {
+        recordedCooperativeTaskFileNames.append(fileName)
+      }
+    }
+  }
+}
+
+private final class CodexManualCancellationCheck: @unchecked Sendable {
+  private let lock = NSLock()
+  private var isCancelled = false
+
+  func cancel() {
+    lock.withLock { isCancelled = true }
+  }
+
+  func check() throws {
+    if lock.withLock({ isCancelled }) {
+      throw CancellationError()
+    }
+  }
+}
+
+private final class CodexCancellationRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedStartedFileNames: [String] = []
+  private var recordedLineCount = 0
+
+  var startedFileCount: Int {
+    lock.withLock { recordedStartedFileNames.count }
+  }
+
+  var lineCount: Int {
+    lock.withLock { recordedLineCount }
+  }
+
+  func recordStart(_ file: URL) -> Bool {
+    lock.withLock {
+      recordedStartedFileNames.append(file.lastPathComponent)
+      return recordedStartedFileNames.count == 1
+    }
+  }
+
+  func recordLine() {
+    lock.withLock { recordedLineCount += 1 }
+  }
+}
+
+private final class CodexScanCancellationController: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var cancelAction: (@Sendable () -> Void)?
+  private var cancellationRequested = false
+  private var cancellationApplied = false
+
+  func install(_ action: @escaping @Sendable () -> Void) {
+    condition.lock()
+    cancelAction = action
+    let shouldCancel = cancellationRequested
+    condition.unlock()
+    if shouldCancel {
+      applyCancellation(action)
+    }
+  }
+
+  func cancelAndWaitUntilApplied() {
+    condition.lock()
+    cancellationRequested = true
+    let action = cancelAction
+    condition.unlock()
+    if let action {
+      applyCancellation(action)
+    } else {
+      waitUntilApplied()
+    }
+  }
+
+  func waitUntilApplied() {
+    condition.lock()
+    while !cancellationApplied {
+      condition.wait()
+    }
+    condition.unlock()
+  }
+
+  private func applyCancellation(_ action: @Sendable () -> Void) {
+    action()
+    condition.lock()
+    cancellationApplied = true
+    condition.broadcast()
+    condition.unlock()
   }
 }
 
