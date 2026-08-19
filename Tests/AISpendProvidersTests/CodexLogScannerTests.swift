@@ -57,10 +57,11 @@ final class CodexLogScannerTests: XCTestCase {
       file: file,
       relativeTo: root,
       markerBytes: [Data(#""turn_context""#.utf8), Data(#""token_count""#.utf8)],
-      onLineSearchBytes: { searchRecorder.record($0) }
-    ) { _, lineNumber in
-      lineRecorder.record(lineNumber)
-    }
+      onLineSearchBytes: { searchRecorder.record($0) },
+      process: { _, lineNumber in
+        lineRecorder.record(lineNumber)
+      }
+    )
     let result = try await scanCodexRoot(root)
 
     XCTAssertLessThanOrEqual(searchRecorder.byteCount, oversizedLine.count * 2)

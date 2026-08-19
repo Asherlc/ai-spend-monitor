@@ -623,13 +623,15 @@ private enum CodexLineageIndex {
         nextIndex += 1
         group.addTask {
           try Task.checkCancellation()
-          guard let result = try deepScan(
-            discovered,
-            timestampParser: TimestampParser(),
-            retainCandidateEvents: true,
-            onDeepScan: onDeepScan,
-            onDeepScanLine: onDeepScanLine
-          ) else {
+          guard
+            let result = try deepScan(
+              discovered,
+              timestampParser: TimestampParser(),
+              retainCandidateEvents: true,
+              onDeepScan: onDeepScan,
+              onDeepScanLine: onDeepScanLine
+            )
+          else {
             return nil
           }
           return CandidateScan(
