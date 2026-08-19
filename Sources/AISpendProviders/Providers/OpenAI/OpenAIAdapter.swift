@@ -6,7 +6,7 @@ public struct OpenAIAdapter: ProviderAdapter {
 
   private let credential: @Sendable () throws -> Secret?
   private let actual: @Sendable (MonthWindow, Secret) async throws -> [OpenAICostRow]
-  private let local: @Sendable (MonthWindow, Date) throws -> LocalLogScanResult
+  private let local: @Sendable (MonthWindow, Date) async throws -> LocalLogScanResult
   private let fingerprinter: AccountFingerprinter
   private let localIdentity: Secret
   private let now: @Sendable () -> Date
@@ -15,7 +15,7 @@ public struct OpenAIAdapter: ProviderAdapter {
   init(
     credential: @escaping @Sendable () throws -> Secret?,
     actual: @escaping @Sendable (MonthWindow, Secret) async throws -> [OpenAICostRow],
-    local: @escaping @Sendable (MonthWindow, Date) throws -> LocalLogScanResult,
+    local: @escaping @Sendable (MonthWindow, Date) async throws -> LocalLogScanResult,
     fingerprinter: AccountFingerprinter = .production,
     localIdentity: Secret = Secret(UUID().uuidString),
     now: @escaping @Sendable () -> Date,
@@ -121,7 +121,7 @@ public struct OpenAIAdapter: ProviderAdapter {
 
     do {
       try Task.checkCancellation()
-      let result = try local(window, fetchedAt)
+      let result = try await local(window, fetchedAt)
       let uncovered = result.records.filter { estimate in
         !modelLessCoverage.contains { start, end in
           estimate.intervalStart < end && start < estimate.intervalEnd
