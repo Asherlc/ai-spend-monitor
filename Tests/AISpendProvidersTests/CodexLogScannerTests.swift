@@ -1016,6 +1016,74 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
+  func testLineageUsesCapturedCanonicalPathAfterCandidatePathReplacement() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let candidate = root.appendingPathComponent("candidate.jsonl")
+    try writeCodexSession(
+      to: candidate,
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let replacement = root.appendingPathComponent("replacement.txt")
+    try Data("replacement\n".utf8).write(to: replacement)
+    let pathReplacement = CodexCandidatePathReplacement(
+      candidate: candidate,
+      replacement: replacement
+    )
+
+    let result = try await scanCodexRoot(
+      root,
+      onDeepScanLine: { _, _ in pathReplacement.replaceOnce() }
+    )
+
+    XCTAssertTrue(pathReplacement.didReplace)
+    XCTAssertNil(pathReplacement.errorDescription)
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 100)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testRetainedPathReplayUsesCapturedCanonicalPathAfterReplacement() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let candidate = root.appendingPathComponent("candidate.jsonl")
+    try writeCodexSession(
+      to: candidate,
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let replacement = root.appendingPathComponent("replacement.txt")
+    try Data("replacement\n".utf8).write(to: replacement)
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+    let scanner = CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar,
+      beforeLineageScan: {
+        try FileManager.default.removeItem(at: candidate)
+      },
+      afterLineageScan: {
+        try FileManager.default.createSymbolicLink(
+          at: candidate,
+          withDestinationURL: replacement
+        )
+      }
+    )
+
+    let result = try await scanner.scan(window: window, fetchedAt: window.end)
+
+    XCTAssertTrue(result.records.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "candidate.jsonl")])
+  }
+
   func testTransitiveAncestorAppendAfterLineageKeepsCapturedChildUsage() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1351,6 +1419,43 @@ private final class CodexDeepScanRecorder: @unchecked Sendable {
 
   func count(for fileName: String) -> Int {
     lock.withLock { recordedFileNames.count { $0 == fileName } }
+  }
+}
+
+private final class CodexCandidatePathReplacement: @unchecked Sendable {
+  private let candidate: URL
+  private let replacement: URL
+  private let lock = NSLock()
+  private var recordedDidReplace = false
+  private var recordedErrorDescription: String?
+
+  init(candidate: URL, replacement: URL) {
+    self.candidate = candidate
+    self.replacement = replacement
+  }
+
+  var didReplace: Bool {
+    lock.withLock { recordedDidReplace }
+  }
+
+  var errorDescription: String? {
+    lock.withLock { recordedErrorDescription }
+  }
+
+  func replaceOnce() {
+    lock.withLock {
+      guard !recordedDidReplace, recordedErrorDescription == nil else { return }
+      do {
+        try FileManager.default.removeItem(at: candidate)
+        try FileManager.default.createSymbolicLink(
+          at: candidate,
+          withDestinationURL: replacement
+        )
+        recordedDidReplace = true
+      } catch {
+        recordedErrorDescription = String(describing: error)
+      }
+    }
   }
 }
 
