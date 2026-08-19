@@ -5,6 +5,39 @@ import XCTest
 @testable import AISpendProviders
 
 final class CodexLogScannerTests: XCTestCase {
+  func testOversizedIrrelevantLineConsumesSearchBudgetLinearlyAndPreservesUsage() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("oversized-irrelevant.jsonl")
+    let oversizedLine = Data(repeating: 0x78, count: 32 * 1_024 * 1_024)
+    let relevantLines = [
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ]
+    var contents = oversizedLine
+    contents.append(0x0A)
+    contents.append(Data((relevantLines.joined(separator: "\n") + "\n").utf8))
+    try contents.write(to: file)
+    try setModificationDate(file)
+    let searchRecorder = CodexLineSearchRecorder()
+    let lineRecorder = CodexDeepScanLineRecorder()
+
+    try LocalLogScanner.scanFile(
+      file: file,
+      relativeTo: root,
+      markerBytes: [Data(#""turn_context""#.utf8), Data(#""token_count""#.utf8)],
+      onLineSearchBytes: { searchRecorder.record($0) }
+    ) { _, lineNumber in
+      lineRecorder.record(lineNumber)
+    }
+    let result = try scanCodexRoot(root)
+
+    XCTAssertLessThanOrEqual(searchRecorder.byteCount, oversizedLine.count * 2)
+    XCTAssertEqual(lineRecorder.lineNumbers, [2, 3])
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 100)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
   func testFilteredStreamingSkipsIrrelevantLineAndPreservesRelevantLineNumbers() throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
@@ -1064,6 +1097,7 @@ final class CodexLogScannerTests: XCTestCase {
       secondResult.records.first?.observationID
     )
   }
+
 }
 
 func fixtureRoot(named fixture: String) throws -> URL {
@@ -1179,6 +1213,21 @@ private final class CodexDeepScanLineRecorder: @unchecked Sendable {
 
   func record(_ lineNumber: Int) {
     lock.withLock { recordedLineNumbers.append(lineNumber) }
+  }
+}
+
+private final class CodexLineSearchRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedByteCount = 0
+
+  deinit {}
+
+  var byteCount: Int {
+    lock.withLock { recordedByteCount }
+  }
+
+  func record(_ byteCount: Int) {
+    lock.withLock { recordedByteCount += byteCount }
   }
 }
 

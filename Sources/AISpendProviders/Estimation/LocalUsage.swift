@@ -319,12 +319,14 @@ struct LocalLogScanner {
     file: URL,
     relativeTo root: URL,
     markerBytes: [Data],
+    onLineSearchBytes: ((Int) -> Void)? = nil,
     process: (Data, Int) -> Void
   ) throws {
     try scanFileImpl(
       file: file,
       relativeTo: root,
       markerBytes: markerBytes,
+      onLineSearchBytes: onLineSearchBytes,
       process: process
     )
   }
@@ -333,6 +335,7 @@ struct LocalLogScanner {
     file: URL,
     relativeTo root: URL,
     markerBytes: [Data]?,
+    onLineSearchBytes: ((Int) -> Void)? = nil,
     process: (Data, Int) -> Void
   ) throws {
     let rootComponents = root.standardizedFileURL.pathComponents
@@ -370,11 +373,26 @@ struct LocalLogScanner {
         }
         break
       }
-      buffer.append(chunk)
+      if discardingOversizedLine {
+        onLineSearchBytes?(chunk.count)
+        guard let newline = chunk.firstIndex(of: 0x0A) else {
+          continue
+        }
+        lineNumber += 1
+        discardingOversizedLine = false
+        if markerBytes == nil {
+          process(Data(), lineNumber)
+        }
+        try Task.checkCancellation()
+        buffer.append(contentsOf: chunk[chunk.index(after: newline)...])
+      } else {
+        buffer.append(chunk)
+      }
       var lineStart = buffer.startIndex
-      while lineStart < buffer.endIndex,
-        let newline = buffer[lineStart...].firstIndex(of: 0x0A)
-      {
+      while lineStart < buffer.endIndex {
+        let remainingLine = buffer[lineStart...]
+        onLineSearchBytes?(remainingLine.count)
+        guard let newline = remainingLine.firstIndex(of: 0x0A) else { break }
         try Task.checkCancellation()
         lineNumber += 1
         let line = buffer[lineStart..<newline]
