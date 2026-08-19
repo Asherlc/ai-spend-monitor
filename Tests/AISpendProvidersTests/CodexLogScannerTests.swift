@@ -5,7 +5,115 @@ import XCTest
 @testable import AISpendProviders
 
 final class CodexLogScannerTests: XCTestCase {
-  func testFilteredStreamingSkipsIrrelevantLineAndPreservesRelevantLineNumbers() throws {
+  func testIndependentCandidateDeepScansRunConcurrentlyWithDeterministicUsage() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    for (index, tokens) in [("a", 100), ("b", 200)] {
+      try writeCodexSession(
+        to: root.appendingPathComponent("\(index).jsonl"),
+        lines: [
+          #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+          #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":\#(tokens),"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        ]
+      )
+    }
+    let recorder = CodexConcurrentScanRecorder()
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try await CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar,
+      onFullFileScan: { _ in recorder.record() }
+    ).scan(window: window, fetchedAt: window.end)
+
+    XCTAssertGreaterThan(recorder.maximumConcurrentScans, 1)
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 300)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testCandidateAndHistoricalDeepScansLeaveCooperativeTaskExecutor() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let parent = root.appendingPathComponent("old-parent.jsonl")
+    try writeCodexSession(
+      to: parent,
+      lines: [
+        #"{"timestamp":"2026-05-31T10:44:00Z","type":"session_meta","payload":{"id":"old-parent"}}"#,
+        #"{"timestamp":"2026-05-31T10:45:00Z","type":"event_msg","payload":{"type":"token_count","model":"gpt-5.3-codex","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    try setModificationDate(parent, to: isoDate("2026-05-31T12:00:00Z"))
+    try writeCodexSession(
+      to: root.appendingPathComponent("child.jsonl"),
+      lines: [
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"session_meta","payload":{"id":"child","forked_from_id":"old-parent"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:46:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        #"{"timestamp":"2026-06-12T10:46:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let recorder = CodexExecutorIsolationRecorder()
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+
+    let result = try await CodexScanTaskContext.$marker.withValue(true) {
+      try await CodexLogScanner(
+        sessionRoots: [root],
+        priceCatalog: try PriceCatalog.bundled(),
+        calendar: calendar,
+        onFullFileScan: { recorder.record($0) }
+      ).scan(window: window, fetchedAt: window.end)
+    }
+
+    XCTAssertEqual(recorder.fileNames.sorted(), ["child.jsonl", "old-parent.jsonl"])
+    XCTAssertTrue(recorder.cooperativeTaskFileNames.isEmpty)
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testOversizedIrrelevantLineConsumesSearchBudgetLinearlyAndPreservesUsage() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("oversized-irrelevant.jsonl")
+    let oversizedLine = Data(repeating: 0x78, count: 32 * 1_024 * 1_024)
+    let relevantLines = [
+      #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+      #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+    ]
+    var contents = oversizedLine
+    contents.append(0x0A)
+    contents.append(Data((relevantLines.joined(separator: "\n") + "\n").utf8))
+    try contents.write(to: file)
+    try setModificationDate(file)
+    let searchRecorder = CodexLineSearchRecorder()
+    let lineRecorder = CodexDeepScanLineRecorder()
+
+    try LocalLogScanner.scanFile(
+      file: file,
+      relativeTo: root,
+      markerBytes: [Data(#""turn_context""#.utf8), Data(#""token_count""#.utf8)],
+      onLineSearchBytes: { searchRecorder.record($0) },
+      process: { _, lineNumber in
+        lineRecorder.record(lineNumber)
+      }
+    )
+    let result = try await scanCodexRoot(root)
+
+    XCTAssertLessThanOrEqual(searchRecorder.byteCount, oversizedLine.count * 2)
+    XCTAssertEqual(lineRecorder.lineNumbers, [2, 3])
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 100)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testFilteredStreamingSkipsIrrelevantLineAndPreservesRelevantLineNumbers() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let file = root.appendingPathComponent("filtered.jsonl")
@@ -17,7 +125,7 @@ final class CodexLogScannerTests: XCTestCase {
     try writeCodexSession(to: file, lines: lines)
     let recorder = CodexDeepScanLineRecorder()
 
-    let result = try scanCodexRoot(
+    let result = try await scanCodexRoot(
       root,
       onDeepScanLine: { _, lineNumber in
         recorder.record(lineNumber)
@@ -56,8 +164,86 @@ final class CodexLogScannerTests: XCTestCase {
     }
   }
 
-  func testCumulativeTotalReconcilesEarlierLastOnlyUsage() throws {
-    let result = try scanCodexLines([
+  func testFilteredStreamingUsesExternalCancellationCheckAtLineBoundary() throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("external-cancel.jsonl")
+    try writeCodexSession(
+      to: file,
+      lines: [#"{"type":"turn_context"}"#, #"{"type":"token_count"}"#]
+    )
+    let cancellation = CodexManualCancellationCheck()
+    let recorder = CodexDeepScanLineRecorder()
+
+    XCTAssertThrowsError(
+      try LocalLogScanner.scanFile(
+        file: file,
+        relativeTo: root,
+        markerBytes: [Data(#""turn_context""#.utf8), Data(#""token_count""#.utf8)],
+        cancellationCheck: { try cancellation.check() }
+      ) { _, lineNumber in
+        recorder.record(lineNumber)
+        cancellation.cancel()
+      }
+    ) { error in
+      XCTAssertTrue(error is CancellationError)
+    }
+    XCTAssertEqual(recorder.lineNumbers, [1])
+  }
+
+  func testCancellationStopsInFlightAndQueuedCandidateScans() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    for index in 0..<12 {
+      try writeCodexSession(
+        to: root.appendingPathComponent("candidate-\(index).jsonl"),
+        lines: [
+          #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+          #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+        ]
+      )
+    }
+    let recorder = CodexCancellationRecorder()
+    let cancellation = CodexScanCancellationController()
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+    let scanner = CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar,
+      onFullFileScan: { file in
+        if recorder.recordStart(file) {
+          cancellation.cancelAndWaitUntilApplied()
+        } else {
+          cancellation.waitUntilApplied()
+        }
+      },
+      onDeepScanLine: { _, _ in recorder.recordLine() }
+    )
+    let task = Task {
+      try await scanner.scan(window: window, fetchedAt: window.end)
+    }
+    cancellation.install { task.cancel() }
+
+    do {
+      _ = try await task.value
+      XCTFail("Expected cancellation")
+    } catch is CancellationError {
+      XCTAssertTrue(true)
+    } catch {
+      XCTFail("Expected CancellationError, got \(error)")
+    }
+
+    XCTAssertGreaterThan(recorder.startedFileCount, 0)
+    XCTAssertLessThanOrEqual(recorder.startedFileCount, 8)
+    XCTAssertEqual(recorder.lineCount, 0)
+  }
+
+  func testCumulativeTotalReconcilesEarlierLastOnlyUsage() async throws {
+    let result = try await scanCodexLines([
       #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
       #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
       #"{"timestamp":"2026-06-12T10:45:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":150,"cached_input_tokens":0,"output_tokens":0}}}}"#,
@@ -67,8 +253,8 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testFirstCumulativeSnapshotUsesLastDeltaInsteadOfCopiedTotal() throws {
-    let result = try scanCodexLines([
+  func testFirstCumulativeSnapshotUsesLastDeltaInsteadOfCopiedTotal() async throws {
+    let result = try await scanCodexLines([
       #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
       #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}"#,
     ])
@@ -77,8 +263,8 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testLastOnlyCounterOverflowFailsClosedWithoutCrashing() throws {
-    let result = try scanCodexLines([
+  func testLastOnlyCounterOverflowFailsClosedWithoutCrashing() async throws {
+    let result = try await scanCodexLines([
       #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
       #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":\#(Int.max),"cached_input_tokens":0,"output_tokens":0}}}}"#,
       #"{"timestamp":"2026-06-12T10:45:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":0}}}}"#,
@@ -88,8 +274,8 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "session.jsonl")])
   }
 
-  func testInterleavedCounterGrowthIsContainedByHighWatermark() throws {
-    let result = try scanCodexLines([
+  func testInterleavedCounterGrowthIsContainedByHighWatermark() async throws {
+    let result = try await scanCodexLines([
       #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
       #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
       #"{"timestamp":"2026-06-12T10:45:01Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":40,"cached_input_tokens":0,"output_tokens":0}}}}"#,
@@ -100,8 +286,8 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testWhitespaceForkIdentifierDoesNotSuppressRootSessionUsage() throws {
-    let result = try scanCodexLines([
+  func testWhitespaceForkIdentifierDoesNotSuppressRootSessionUsage() async throws {
+    let result = try await scanCodexLines([
       #"{"timestamp":"2026-06-12T10:44:59Z","type":"session_meta","payload":{"id":"root-session","forked_from_id":"   "}}"#,
       #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
       #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
@@ -111,7 +297,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testDesktopChildrenWithSharedSessionIDCountIndependentlyByPayloadID() throws {
+  func testDesktopChildrenWithSharedSessionIDCountIndependentlyByPayloadID() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -139,14 +325,14 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.count, 1)
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 150)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testLegacySessionIDMetadataResolvesForkedParent() throws {
+  func testLegacySessionIDMetadataResolvesForkedParent() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -167,13 +353,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 125)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testWhitespacePayloadSessionIDFallsThroughToPayloadSessionId() throws {
+  func testWhitespacePayloadSessionIDFallsThroughToPayloadSessionId() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -193,13 +379,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 110)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testWhitespaceTopLevelSessionIDFallsThroughToTopLevelSessionId() throws {
+  func testWhitespaceTopLevelSessionIDFallsThroughToTopLevelSessionId() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -219,13 +405,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 110)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testWhitespacePayloadIDFallsThroughToTopLevelIDBeforeSessionID() throws {
+  func testWhitespacePayloadIDFallsThroughToTopLevelIDBeforeSessionID() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -245,13 +431,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 60)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testForkResolvesParentWhoseSessionIdentifierIsTopLevel() throws {
+  func testForkResolvesParentWhoseSessionIdentifierIsTopLevel() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -277,7 +463,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar
@@ -287,7 +473,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testRepeatedFlatTotalSnapshotWithNonzeroLastUsageContributesZero() throws {
+  func testRepeatedFlatTotalSnapshotWithNonzeroLastUsageContributesZero() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -305,7 +491,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar
@@ -318,7 +504,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testForkedSessionCountsOnlyGrowthBeyondCopiedParentPrefix() throws {
+  func testForkedSessionCountsOnlyGrowthBeyondCopiedParentPrefix() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -346,7 +532,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar
@@ -359,7 +545,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testSubagentOwnedSuffixUsesLocallyConfirmedCopiedBaseline() throws {
+  func testSubagentOwnedSuffixUsesLocallyConfirmedCopiedBaseline() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let parent = root.appendingPathComponent("parent.jsonl")
@@ -386,13 +572,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 100)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testIdentifierlessEmbeddedMetadataInvalidatesEarlierSubagentBoundary() throws {
+  func testIdentifierlessEmbeddedMetadataInvalidatesEarlierSubagentBoundary() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -418,13 +604,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testForkBaselineUsesParentRawCumulativeSnapshot() throws {
+  func testForkBaselineUsesParentRawCumulativeSnapshot() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -448,13 +634,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 1)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testForkedSubagentWithIndependentCounterCountsFromZero() throws {
+  func testForkedSubagentWithIndependentCounterCountsFromZero() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -475,13 +661,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 1_020)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testIndependentSubagentRemainsIndependentAfterSurpassingParentTotal() throws {
+  func testIndependentSubagentRemainsIndependentAfterSurpassingParentTotal() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -502,13 +688,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 2_200)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testCurrentMonthForkResolvesParentFileModifiedBeforeWindow() throws {
+  func testCurrentMonthForkResolvesParentFileModifiedBeforeWindow() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let parent = root.appendingPathComponent("old-parent.jsonl")
@@ -531,13 +717,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testFullScansEachCandidateAndReachableHistoricalParentOnlyOnce() throws {
+  func testFullScansEachCandidateAndReachableHistoricalParentOnlyOnce() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let parent = root.appendingPathComponent("old-parent.jsonl")
@@ -574,7 +760,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar,
@@ -588,7 +774,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testOverlappingRootsScanCanonicalCandidateOnlyOnce() throws {
+  func testOverlappingRootsScanCanonicalCandidateOnlyOnce() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -605,7 +791,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root, root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar,
@@ -618,7 +804,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testCurrentCandidateThatIsAlsoParentIsScannedOnlyOnce() throws {
+  func testCurrentCandidateThatIsAlsoParentIsScannedOnlyOnce() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -645,7 +831,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar,
@@ -658,7 +844,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testDuplicateParentSessionIdentifiersFailClosed() throws {
+  func testDuplicateParentSessionIdentifiersFailClosed() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let firstParent = root.appendingPathComponent("a-parent.jsonl")
@@ -689,13 +875,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
   }
 
-  func testDuplicateParentIdentifierBeyondMetadataPrefixFailsClosed() throws {
+  func testDuplicateParentIdentifierBeyondMetadataPrefixFailsClosed() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let oldParent = root.appendingPathComponent("a-old-parent.jsonl")
@@ -724,13 +910,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
   }
 
-  func testCumulativeChildResolvesLastOnlyParentBaseline() throws {
+  func testCumulativeChildResolvesLastOnlyParentBaseline() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -751,13 +937,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 150)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testForkWithResolvedParentButNoUsageBaselineFailsClosed() throws {
+  func testForkWithResolvedParentButNoUsageBaselineFailsClosed() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -775,13 +961,13 @@ final class CodexLogScannerTests: XCTestCase {
       ]
     )
 
-    let result = try scanCodexRoot(root)
+    let result = try await scanCodexRoot(root)
 
     XCTAssertTrue(result.records.isEmpty)
     XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "child.jsonl")])
   }
 
-  func testScanUsesStableCandidateSnapshotAcrossLineageBoundary() throws {
+  func testScanUsesStableCandidateSnapshotAcrossLineageBoundary() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -824,13 +1010,81 @@ final class CodexLogScannerTests: XCTestCase {
       }
     )
 
-    let result = try scanner.scan(window: window, fetchedAt: window.end)
+    let result = try await scanner.scan(window: window, fetchedAt: window.end)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 150)
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testTransitiveAncestorAppendAfterLineageKeepsCapturedChildUsage() throws {
+  func testLineageUsesCapturedCanonicalPathAfterCandidatePathReplacement() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let candidate = root.appendingPathComponent("candidate.jsonl")
+    try writeCodexSession(
+      to: candidate,
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0},"total_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let replacement = root.appendingPathComponent("replacement.txt")
+    try Data("replacement\n".utf8).write(to: replacement)
+    let pathReplacement = CodexCandidatePathReplacement(
+      candidate: candidate,
+      replacement: replacement
+    )
+
+    let result = try await scanCodexRoot(
+      root,
+      onDeepScanLine: { _, _ in pathReplacement.replaceOnce() }
+    )
+
+    XCTAssertTrue(pathReplacement.didReplace)
+    XCTAssertNil(pathReplacement.errorDescription)
+    XCTAssertEqual(result.records.first?.estimate?.inputTokens, 100)
+    XCTAssertTrue(result.diagnostics.isEmpty)
+  }
+
+  func testRetainedPathReplayUsesCapturedCanonicalPathAfterReplacement() async throws {
+    let root = try emptyRoot()
+    defer { try? FileManager.default.removeItem(at: root) }
+    let candidate = root.appendingPathComponent("candidate.jsonl")
+    try writeCodexSession(
+      to: candidate,
+      lines: [
+        #"{"timestamp":"2026-06-12T10:44:00Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
+        #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
+      ]
+    )
+    let replacement = root.appendingPathComponent("replacement.txt")
+    try Data("replacement\n".utf8).write(to: replacement)
+    let calendar = utcCalendar()
+    let window = try MonthWindow.current(
+      containing: isoDate("2026-06-15T00:00:00Z"),
+      calendar: calendar
+    )
+    let scanner = CodexLogScanner(
+      sessionRoots: [root],
+      priceCatalog: try PriceCatalog.bundled(),
+      calendar: calendar,
+      beforeLineageScan: {
+        try FileManager.default.removeItem(at: candidate)
+      },
+      afterLineageScan: {
+        try FileManager.default.createSymbolicLink(
+          at: candidate,
+          withDestinationURL: replacement
+        )
+      }
+    )
+
+    let result = try await scanner.scan(window: window, fetchedAt: window.end)
+
+    XCTAssertTrue(result.records.isEmpty)
+    XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "candidate.jsonl")])
+  }
+
+  func testTransitiveAncestorAppendAfterLineageKeepsCapturedChildUsage() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let grandparent = root.appendingPathComponent("grandparent.jsonl")
@@ -868,7 +1122,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar,
@@ -888,7 +1142,7 @@ final class CodexLogScannerTests: XCTestCase {
     )
   }
 
-  func testCandidateMissingDuringLineageScanFailsClosedIfRecreatedBeforeBilling() throws {
+  func testCandidateMissingDuringLineageScanFailsClosedIfRecreatedBeforeBilling() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     try writeCodexSession(
@@ -921,13 +1175,13 @@ final class CodexLogScannerTests: XCTestCase {
       }
     )
 
-    let result = try scanner.scan(window: window, fetchedAt: window.end)
+    let result = try await scanner.scan(window: window, fetchedAt: window.end)
 
     XCTAssertEqual(result.records.first?.estimate?.inputTokens, 50)
     XCTAssertEqual(result.diagnostics, [.sourceUnavailable(file: "recreated.jsonl")])
   }
 
-  func testSkipsIrrelevantLinesBeforeJSONDecoding() throws {
+  func testSkipsIrrelevantLinesBeforeJSONDecoding() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let file = root.appendingPathComponent("large-session.jsonl")
@@ -951,7 +1205,7 @@ final class CodexLogScannerTests: XCTestCase {
     )
     let lineRecorder = CodexDeepScanLineRecorder()
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar,
@@ -963,8 +1217,8 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertEqual(lineRecorder.lineNumbers, [2, 3])
   }
 
-  func testSinglePassPreservesCandidateMalformedLineDiagnostics() throws {
-    let result = try scanCodexLines([
+  func testSinglePassPreservesCandidateMalformedLineDiagnostics() async throws {
+    let result = try await scanCodexLines([
       #"{"timestamp":"2026-06-12T10:44:59Z","type":"turn_context","payload":{"model":"gpt-5.3-codex"}}"#,
       #"{"type":"event_msg","payload":{"type":"token_count""#,
       #"{"timestamp":"2026-06-12T10:45:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}}}"#,
@@ -974,7 +1228,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertEqual(result.diagnostics, [.malformedLine(file: "session.jsonl", line: 2)])
   }
 
-  func testScansStreamsDeduplicatesAndAggregatesOneRecordPerModelDay() throws {
+  func testScansStreamsDeduplicatesAndAggregatesOneRecordPerModelDay() async throws {
     let root = try fixtureRoot(named: "codex-session")
     defer { try? FileManager.default.removeItem(at: root) }
     let calendar = utcCalendar()
@@ -988,7 +1242,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try scanner.scan(
+    let result = try await scanner.scan(
       window: window,
       fetchedAt: isoDate("2026-06-30T12:00:00Z")
     )
@@ -1006,7 +1260,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertTrue(result.diagnostics.isEmpty)
   }
 
-  func testUnknownModelProducesUnavailableDiagnosticAndNoZeroRecord() throws {
+  func testUnknownModelProducesUnavailableDiagnosticAndNoZeroRecord() async throws {
     let root = try emptyRoot()
     defer { try? FileManager.default.removeItem(at: root) }
     let file = root.appendingPathComponent("unknown.jsonl")
@@ -1023,7 +1277,7 @@ final class CodexLogScannerTests: XCTestCase {
       calendar: calendar
     )
 
-    let result = try CodexLogScanner(
+    let result = try await CodexLogScanner(
       sessionRoots: [root],
       priceCatalog: try PriceCatalog.bundled(),
       calendar: calendar
@@ -1033,7 +1287,7 @@ final class CodexLogScannerTests: XCTestCase {
     XCTAssertEqual(result.diagnostics, [.unavailableEstimate(model: "future-codex")])
   }
 
-  func testSyntheticEventIdentityUsesStableFilePositionWithoutCollisions() throws {
+  func testSyntheticEventIdentityUsesStableFilePositionWithoutCollisions() async throws {
     let first = try codexRootWithRepeatedUsage()
     let second = try codexRootWithRepeatedUsage()
     defer {
@@ -1047,12 +1301,12 @@ final class CodexLogScannerTests: XCTestCase {
     )
     let catalog = try PriceCatalog.bundled()
 
-    let firstResult = try CodexLogScanner(
+    let firstResult = try await CodexLogScanner(
       sessionRoots: [first],
       priceCatalog: catalog,
       calendar: calendar
     ).scan(window: window, fetchedAt: window.end)
-    let secondResult = try CodexLogScanner(
+    let secondResult = try await CodexLogScanner(
       sessionRoots: [second],
       priceCatalog: catalog,
       calendar: calendar
@@ -1064,6 +1318,7 @@ final class CodexLogScannerTests: XCTestCase {
       secondResult.records.first?.observationID
     )
   }
+
 }
 
 func fixtureRoot(named fixture: String) throws -> URL {
@@ -1124,23 +1379,23 @@ private func appendCodexLine(_ line: String, to file: URL) throws {
   try handle.write(contentsOf: Data((line + "\n").utf8))
 }
 
-private func scanCodexLines(_ lines: [String]) throws -> LocalLogScanResult {
+private func scanCodexLines(_ lines: [String]) async throws -> LocalLogScanResult {
   let root = try emptyRoot()
   defer { try? FileManager.default.removeItem(at: root) }
   try writeCodexSession(to: root.appendingPathComponent("session.jsonl"), lines: lines)
-  return try scanCodexRoot(root)
+  return try await scanCodexRoot(root)
 }
 
 private func scanCodexRoot(
   _ root: URL,
   onDeepScanLine: @escaping @Sendable (Data, Int) -> Void = { _, _ in }
-) throws -> LocalLogScanResult {
+) async throws -> LocalLogScanResult {
   let calendar = utcCalendar()
   let window = try MonthWindow.current(
     containing: isoDate("2026-06-15T00:00:00Z"),
     calendar: calendar
   )
-  return try CodexLogScanner(
+  return try await CodexLogScanner(
     sessionRoots: [root],
     priceCatalog: try PriceCatalog.bundled(),
     calendar: calendar,
@@ -1167,6 +1422,43 @@ private final class CodexDeepScanRecorder: @unchecked Sendable {
   }
 }
 
+private final class CodexCandidatePathReplacement: @unchecked Sendable {
+  private let candidate: URL
+  private let replacement: URL
+  private let lock = NSLock()
+  private var recordedDidReplace = false
+  private var recordedErrorDescription: String?
+
+  init(candidate: URL, replacement: URL) {
+    self.candidate = candidate
+    self.replacement = replacement
+  }
+
+  var didReplace: Bool {
+    lock.withLock { recordedDidReplace }
+  }
+
+  var errorDescription: String? {
+    lock.withLock { recordedErrorDescription }
+  }
+
+  func replaceOnce() {
+    lock.withLock {
+      guard !recordedDidReplace, recordedErrorDescription == nil else { return }
+      do {
+        try FileManager.default.removeItem(at: candidate)
+        try FileManager.default.createSymbolicLink(
+          at: candidate,
+          withDestinationURL: replacement
+        )
+        recordedDidReplace = true
+      } catch {
+        recordedErrorDescription = String(describing: error)
+      }
+    }
+  }
+}
+
 private final class CodexDeepScanLineRecorder: @unchecked Sendable {
   private let lock = NSLock()
   private var recordedLineNumbers: [Int] = []
@@ -1179,6 +1471,156 @@ private final class CodexDeepScanLineRecorder: @unchecked Sendable {
 
   func record(_ lineNumber: Int) {
     lock.withLock { recordedLineNumbers.append(lineNumber) }
+  }
+}
+
+private final class CodexLineSearchRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedByteCount = 0
+
+  deinit {}
+
+  var byteCount: Int {
+    lock.withLock { recordedByteCount }
+  }
+
+  func record(_ byteCount: Int) {
+    lock.withLock { recordedByteCount += byteCount }
+  }
+}
+
+private final class CodexConcurrentScanRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var activeScans = 0
+  private var recordedMaximum = 0
+
+  deinit {}
+
+  var maximumConcurrentScans: Int {
+    lock.withLock { recordedMaximum }
+  }
+
+  func record() {
+    lock.withLock {
+      activeScans += 1
+      recordedMaximum = max(recordedMaximum, activeScans)
+    }
+    Thread.sleep(forTimeInterval: 0.05)
+    lock.withLock { activeScans -= 1 }
+  }
+}
+
+private enum CodexScanTaskContext {
+  @TaskLocal static var marker = false
+}
+
+private final class CodexExecutorIsolationRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedFileNames: [String] = []
+  private var recordedCooperativeTaskFileNames: [String] = []
+
+  var fileNames: [String] {
+    lock.withLock { recordedFileNames }
+  }
+
+  var cooperativeTaskFileNames: [String] {
+    lock.withLock { recordedCooperativeTaskFileNames }
+  }
+
+  func record(_ file: URL) {
+    let fileName = file.lastPathComponent
+    let hasTaskMarker = CodexScanTaskContext.marker
+    lock.withLock {
+      recordedFileNames.append(fileName)
+      if hasTaskMarker {
+        recordedCooperativeTaskFileNames.append(fileName)
+      }
+    }
+  }
+}
+
+private final class CodexManualCancellationCheck: @unchecked Sendable {
+  private let lock = NSLock()
+  private var isCancelled = false
+
+  func cancel() {
+    lock.withLock { isCancelled = true }
+  }
+
+  func check() throws {
+    if lock.withLock({ isCancelled }) {
+      throw CancellationError()
+    }
+  }
+}
+
+private final class CodexCancellationRecorder: @unchecked Sendable {
+  private let lock = NSLock()
+  private var recordedStartedFileNames: [String] = []
+  private var recordedLineCount = 0
+
+  var startedFileCount: Int {
+    lock.withLock { recordedStartedFileNames.count }
+  }
+
+  var lineCount: Int {
+    lock.withLock { recordedLineCount }
+  }
+
+  func recordStart(_ file: URL) -> Bool {
+    lock.withLock {
+      recordedStartedFileNames.append(file.lastPathComponent)
+      return recordedStartedFileNames.count == 1
+    }
+  }
+
+  func recordLine() {
+    lock.withLock { recordedLineCount += 1 }
+  }
+}
+
+private final class CodexScanCancellationController: @unchecked Sendable {
+  private let condition = NSCondition()
+  private var cancelAction: (@Sendable () -> Void)?
+  private var cancellationRequested = false
+  private var cancellationApplied = false
+
+  func install(_ action: @escaping @Sendable () -> Void) {
+    condition.lock()
+    cancelAction = action
+    let shouldCancel = cancellationRequested
+    condition.unlock()
+    if shouldCancel {
+      applyCancellation(action)
+    }
+  }
+
+  func cancelAndWaitUntilApplied() {
+    condition.lock()
+    cancellationRequested = true
+    let action = cancelAction
+    condition.unlock()
+    if let action {
+      applyCancellation(action)
+    } else {
+      waitUntilApplied()
+    }
+  }
+
+  func waitUntilApplied() {
+    condition.lock()
+    while !cancellationApplied {
+      condition.wait()
+    }
+    condition.unlock()
+  }
+
+  private func applyCancellation(_ action: @Sendable () -> Void) {
+    action()
+    condition.lock()
+    cancellationApplied = true
+    condition.broadcast()
+    condition.unlock()
   }
 }
 

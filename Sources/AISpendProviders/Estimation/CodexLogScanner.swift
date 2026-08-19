@@ -1,4 +1,5 @@
 import AISpendCore
+import Dispatch
 import Foundation
 
 public struct CodexLogScanner: Sendable {
@@ -43,7 +44,7 @@ public struct CodexLogScanner: Sendable {
     self.onRetentionMetrics = onRetentionMetrics
   }
 
-  public func scan(window: MonthWindow, fetchedAt: Date) throws -> LocalLogScanResult {
+  public func scan(window: MonthWindow, fetchedAt: Date) async throws -> LocalLogScanResult {
     var diagnostics: [LocalLogDiagnostic] = []
     let files = try LocalLogScanner.candidateFiles(
       sessionRoots: sessionRoots,
@@ -51,7 +52,7 @@ public struct CodexLogScanner: Sendable {
       diagnostics: &diagnostics
     )
     try beforeLineageScan()
-    let build = try CodexLineageIndex.build(
+    let build = try await CodexLineageIndex.build(
       sessionRoots: sessionRoots,
       candidateFiles: files,
       onDeepScan: onFullFileScan,
@@ -83,11 +84,12 @@ public struct CodexLogScanner: Sendable {
       }
     }
     let retainedPaths = Set(build.candidates.map(\.sourcePath))
-    for file in files {
+    for candidate in build.candidateSources {
       try Task.checkCancellation()
-      let path = file.url.resolvingSymlinksInPath().path
-      if !retainedPaths.contains(path), build.lineage[path]?.suppressesUsage == true {
-        Self.appendSourceUnavailable(file.url.lastPathComponent, to: &diagnostics)
+      if !retainedPaths.contains(candidate.sourcePath),
+        build.lineage[candidate.sourcePath]?.suppressesUsage == true
+      {
+        Self.appendSourceUnavailable(candidate.fileName, to: &diagnostics)
       }
     }
     return try LocalLogScanner.scan(
@@ -184,9 +186,15 @@ private struct CodexRetainedCandidate: Sendable {
   let events: [CodexRetainedUsageEvent]
 }
 
+private struct CodexCandidateSource: Sendable {
+  let fileName: String
+  let sourcePath: String
+}
+
 private struct CodexLineageBuild: Sendable {
   let lineage: [String: CodexLineage]
   let candidates: [CodexRetainedCandidate]
+  let candidateSources: [CodexCandidateSource]
   let diagnostics: [LocalLogDiagnostic]
   let retentionMetrics: CodexRetentionMetrics
 }
@@ -482,7 +490,12 @@ struct CodexUsageState {
 }
 
 private enum CodexLineageIndex {
-  private struct SessionFile {
+  private static let maximumBlockingReaders = 8
+  private static let blockingScanExecutor = BlockingScanExecutor(
+    maximumReaderCount: maximumBlockingReaders
+  )
+
+  private struct SessionFile: Sendable {
     var sessionID: String?
     var parentSessionID: String?
     var hasObservedMetadata = false
@@ -494,7 +507,7 @@ private enum CodexLineageIndex {
     var sourceUnavailable = false
   }
 
-  private struct DiscoveredFile {
+  private struct DiscoveredFile: Sendable {
     let file: LocalLogFile
     let sessionID: String?
   }
@@ -530,10 +543,105 @@ private enum CodexLineageIndex {
     var matchesFirstChild = false
   }
 
-  private struct DeepScanResult {
+  private struct DeepScanResult: Sendable {
     let session: SessionFile
     let retainedEvents: [CodexRetainedUsageEvent]
     let diagnostics: [LocalLogDiagnostic]
+  }
+
+  private struct CandidateWorkItem: Sendable {
+    let canonicalPath: String
+    let fileName: String
+    let relativePath: String
+  }
+
+  private struct DeepScanWorkItem: Sendable {
+    let discovered: DiscoveredFile
+    let canonicalPath: String
+    let fileName: String
+    let relativePath: String
+    let retainCandidateEvents: Bool
+  }
+
+  private struct CompletedDeepScan: Sendable {
+    let workItem: DeepScanWorkItem
+    let result: DeepScanResult
+  }
+
+  private final class DeepScanWorkQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private let workItems: [DeepScanWorkItem]
+    private var nextIndex = 0
+
+    init(workItems: [DeepScanWorkItem]) {
+      self.workItems = workItems
+    }
+
+    func next(cancellation: DeepScanCancellation) throws -> DeepScanWorkItem? {
+      try cancellation.check()
+      return lock.withLock {
+        guard nextIndex < workItems.count else { return nil }
+        defer { nextIndex += 1 }
+        return workItems[nextIndex]
+      }
+    }
+  }
+
+  private final class DeepScanCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isCancelled = false
+
+    func cancel() {
+      lock.withLock { isCancelled = true }
+    }
+
+    func check() throws {
+      if lock.withLock({ isCancelled }) {
+        throw CancellationError()
+      }
+    }
+  }
+
+  private final class BlockingScanExecutor: @unchecked Sendable {
+    private let workerQueues: [DispatchQueue]
+
+    init(maximumReaderCount: Int) {
+      precondition(maximumReaderCount > 0)
+      workerQueues = (0..<maximumReaderCount).map { workerIndex in
+        DispatchQueue(
+          label: "com.aispendbar.codex-log-scanner.worker-\(workerIndex)",
+          qos: .userInitiated,
+          autoreleaseFrequency: .workItem
+        )
+      }
+    }
+
+    func run<Value: Sendable>(
+      workerIndex: Int,
+      cancellation: DeepScanCancellation,
+      operation: @escaping @Sendable () throws -> Value
+    ) async throws -> Value {
+      precondition(workerQueues.indices.contains(workerIndex))
+      let queue = workerQueues[workerIndex]
+      return try await withTaskCancellationHandler {
+        try await withCheckedThrowingContinuation { continuation in
+          queue.async {
+            let result: Result<Value, any Error>
+            do {
+              try cancellation.check()
+              let value = try operation()
+              try cancellation.check()
+              result = .success(value)
+            } catch {
+              result = .failure(error)
+            }
+            continuation.resume(with: result)
+          }
+        }
+      } onCancel: {
+        cancellation.cancel()
+      }
+    }
   }
 
   private struct TimestampParser {
@@ -552,11 +660,10 @@ private enum CodexLineageIndex {
   static func build(
     sessionRoots: [URL],
     candidateFiles: [LocalLogFile],
-    onDeepScan: @Sendable (URL) -> Void,
-    onDeepScanLine: @Sendable (Data, Int) -> Void
-  ) throws -> CodexLineageBuild {
-    let timestampParser = TimestampParser()
-    let canonicalCandidates = canonicalFiles(candidateFiles)
+    onDeepScan: @escaping @Sendable (URL) -> Void,
+    onDeepScanLine: @escaping @Sendable (Data, Int) -> Void
+  ) async throws -> CodexLineageBuild {
+    let candidateWorkItems = makeCandidateWorkItems(candidateFiles)
     var discoveredByPath: [String: DiscoveredFile] = [:]
     var seenRootPaths: Set<String> = []
     let canonicalRoots = sessionRoots.map(\.standardizedFileURL).sorted { $0.path < $1.path }
@@ -604,31 +711,68 @@ private enum CodexLineageIndex {
       discoveredPathsBySessionID[sessionID, default: []].insert(path)
     }
 
+    let candidateDeepScanWorkItems: [DeepScanWorkItem] = candidateWorkItems.compactMap {
+      candidate in
+      guard let discovered = discoveredByPath[candidate.canonicalPath] else { return nil }
+      return DeepScanWorkItem(
+        discovered: discovered,
+        canonicalPath: candidate.canonicalPath,
+        fileName: candidate.fileName,
+        relativePath: candidate.relativePath,
+        retainCandidateEvents: true
+      )
+    }
+    let blockingExecutor = Self.blockingScanExecutor
+    let cancellation = DeepScanCancellation()
+    let workQueue = DeepScanWorkQueue(workItems: candidateDeepScanWorkItems)
+    let workerCount = min(Self.maximumBlockingReaders, candidateDeepScanWorkItems.count)
+    let candidateScans = try await withTaskCancellationHandler {
+      try await withThrowingTaskGroup(
+        of: [CompletedDeepScan].self,
+        returning: [CompletedDeepScan].self
+      ) { group in
+        for workerIndex in 0..<workerCount {
+          group.addTask {
+            try await blockingExecutor.run(
+              workerIndex: workerIndex,
+              cancellation: cancellation,
+              operation: {
+                try scanCandidateWorkItems(
+                  workQueue,
+                  cancellation: cancellation,
+                  onDeepScan: onDeepScan,
+                  onDeepScanLine: onDeepScanLine
+                )
+              }
+            )
+          }
+        }
+        var scans: [CompletedDeepScan] = []
+        for try await workerScans in group {
+          scans.append(contentsOf: workerScans)
+        }
+        return scans.sorted { $0.workItem.canonicalPath < $1.workItem.canonicalPath }
+      }
+    } onCancel: {
+      cancellation.cancel()
+    }
+
     var filesByPath: [String: SessionFile] = [:]
     var retainedCandidatesByPath: [String: CodexRetainedCandidate] = [:]
     var diagnostics: [LocalLogDiagnostic] = []
-    for candidate in canonicalCandidates {
-      try Task.checkCancellation()
-      let path = candidate.url.resolvingSymlinksInPath().path
-      guard let discovered = discoveredByPath[path] else { continue }
-      if let result = try deepScan(
-        discovered,
-        timestampParser: timestampParser,
-        retainCandidateEvents: true,
-        onDeepScan: onDeepScan,
-        onDeepScanLine: onDeepScanLine
-      ) {
-        filesByPath[path] = result.session
-        retainedCandidatesByPath[path] = CodexRetainedCandidate(
-          fileName: candidate.url.lastPathComponent,
-          relativePath: relativePath(candidate.url, to: candidate.root),
-          sourcePath: path,
-          events: result.retainedEvents
-        )
-        diagnostics.append(contentsOf: result.diagnostics)
-        if let sessionID = result.session.sessionID {
-          discoveredPathsBySessionID[sessionID, default: []].insert(path)
-        }
+    for scan in candidateScans {
+      let result = scan.result
+      let workItem = scan.workItem
+      filesByPath[workItem.canonicalPath] = result.session
+      retainedCandidatesByPath[workItem.canonicalPath] = CodexRetainedCandidate(
+        fileName: workItem.fileName,
+        relativePath: workItem.relativePath,
+        sourcePath: workItem.canonicalPath,
+        events: result.retainedEvents
+      )
+      diagnostics.append(contentsOf: result.diagnostics)
+      if let sessionID = result.session.sessionID {
+        discoveredPathsBySessionID[sessionID, default: []].insert(workItem.canonicalPath)
       }
     }
 
@@ -649,21 +793,35 @@ private enum CodexLineageIndex {
         }
         continue
       }
+      let workItem = DeepScanWorkItem(
+        discovered: discovered,
+        canonicalPath: path,
+        fileName: discovered.file.url.lastPathComponent,
+        relativePath: relativePath(discovered.file.url, to: discovered.file.root),
+        retainCandidateEvents: false
+      )
       guard
-        let result = try deepScan(
-          discovered,
-          timestampParser: timestampParser,
-          retainCandidateEvents: false,
-          onDeepScan: onDeepScan,
-          onDeepScanLine: onDeepScanLine
+        let completedScan = try await blockingExecutor.run(
+          workerIndex: 0,
+          cancellation: cancellation,
+          operation: {
+            try scanWorkItem(
+              workItem,
+              cancellation: cancellation,
+              onDeepScan: onDeepScan,
+              onDeepScanLine: onDeepScanLine
+            )
+          }
         )
       else {
         continue
       }
+      let result = completedScan.result
+      let canonicalPath = completedScan.workItem.canonicalPath
       let session = result.session
-      filesByPath[path] = session
+      filesByPath[canonicalPath] = session
       if let sessionID = session.sessionID {
-        discoveredPathsBySessionID[sessionID, default: []].insert(path)
+        discoveredPathsBySessionID[sessionID, default: []].insert(canonicalPath)
       }
       if let ancestorID = session.parentSessionID {
         pendingParentIDs.append(ancestorID)
@@ -690,9 +848,9 @@ private enum CodexLineageIndex {
     }
 
     var lineageByPath: [String: CodexLineage] = [:]
-    for candidate in canonicalCandidates {
+    for candidate in candidateWorkItems {
       try Task.checkCancellation()
-      let path = candidate.url.resolvingSymlinksInPath().path
+      let path = candidate.canonicalPath
       guard let file = filesByPath[path] else { continue }
       guard !file.sourceUnavailable, !file.usageState.hasFailed else {
         lineageByPath[path] = CodexLineage(
@@ -767,8 +925,8 @@ private enum CodexLineageIndex {
         isUnresolvedFork: baseline == nil
       )
     }
-    for candidate in canonicalCandidates {
-      let path = candidate.url.resolvingSymlinksInPath().path
+    for candidate in candidateWorkItems {
+      let path = candidate.canonicalPath
       if lineageByPath[path] == nil {
         lineageByPath[path] = CodexLineage(
           inheritedBaseline: nil,
@@ -776,12 +934,15 @@ private enum CodexLineageIndex {
         )
       }
     }
-    let candidates = canonicalCandidates.compactMap { candidate in
-      retainedCandidatesByPath[candidate.url.resolvingSymlinksInPath().path]
+    let candidates = candidateWorkItems.compactMap { candidate in
+      retainedCandidatesByPath[candidate.canonicalPath]
     }
     return CodexLineageBuild(
       lineage: lineageByPath,
       candidates: candidates,
+      candidateSources: candidateWorkItems.map {
+        CodexCandidateSource(fileName: $0.fileName, sourcePath: $0.canonicalPath)
+      },
       diagnostics: diagnostics,
       retentionMetrics: CodexRetentionMetrics(
         scannedFileCount: filesByPath.count
@@ -789,15 +950,64 @@ private enum CodexLineageIndex {
     )
   }
 
-  private static func canonicalFiles(_ files: [LocalLogFile]) -> [LocalLogFile] {
+  private static func scanCandidateWorkItems(
+    _ workQueue: DeepScanWorkQueue,
+    cancellation: DeepScanCancellation,
+    onDeepScan: @Sendable (URL) -> Void,
+    onDeepScanLine: @Sendable (Data, Int) -> Void
+  ) throws -> [CompletedDeepScan] {
+    var completedScans: [CompletedDeepScan] = []
+    while let workItem = try workQueue.next(cancellation: cancellation) {
+      if let completedScan = try scanWorkItem(
+        workItem,
+        cancellation: cancellation,
+        onDeepScan: onDeepScan,
+        onDeepScanLine: onDeepScanLine
+      ) {
+        completedScans.append(completedScan)
+      }
+    }
+    return completedScans
+  }
+
+  private static func scanWorkItem(
+    _ workItem: DeepScanWorkItem,
+    cancellation: DeepScanCancellation,
+    onDeepScan: @Sendable (URL) -> Void,
+    onDeepScanLine: @Sendable (Data, Int) -> Void
+  ) throws -> CompletedDeepScan? {
+    try cancellation.check()
+    guard
+      let result = try deepScan(
+        workItem.discovered,
+        timestampParser: TimestampParser(),
+        retainCandidateEvents: workItem.retainCandidateEvents,
+        onDeepScan: onDeepScan,
+        onDeepScanLine: onDeepScanLine,
+        cancellationCheck: { try cancellation.check() }
+      )
+    else {
+      return nil
+    }
+    try cancellation.check()
+    return CompletedDeepScan(workItem: workItem, result: result)
+  }
+
+  private static func makeCandidateWorkItems(_ files: [LocalLogFile]) -> [CandidateWorkItem] {
     var seenPaths: Set<String> = []
     return files.sorted { lhs, rhs in
       if lhs.root.path != rhs.root.path {
         return lhs.root.path < rhs.root.path
       }
       return lhs.url.path < rhs.url.path
-    }.filter { file in
-      seenPaths.insert(file.url.resolvingSymlinksInPath().path).inserted
+    }.compactMap { file in
+      let canonicalPath = file.url.resolvingSymlinksInPath().path
+      guard seenPaths.insert(canonicalPath).inserted else { return nil }
+      return CandidateWorkItem(
+        canonicalPath: canonicalPath,
+        fileName: file.url.lastPathComponent,
+        relativePath: relativePath(file.url, to: file.root)
+      )
     }
   }
 
@@ -889,7 +1099,8 @@ private enum CodexLineageIndex {
     timestampParser: TimestampParser,
     retainCandidateEvents: Bool,
     onDeepScan: @Sendable (URL) -> Void,
-    onDeepScanLine: @Sendable (Data, Int) -> Void
+    onDeepScanLine: @Sendable (Data, Int) -> Void,
+    cancellationCheck: @Sendable () throws -> Void
   ) throws -> DeepScanResult? {
     var session = SessionFile()
     var currentModel: String?
@@ -900,6 +1111,7 @@ private enum CodexLineageIndex {
     var boundaryCandidate: LocalBoundaryCandidate?
     var diagnostics: [LocalLogDiagnostic] = []
     do {
+      try cancellationCheck()
       onDeepScan(discovered.file.url)
       try LocalLogScanner.scanFile(
         file: discovered.file.url,
@@ -909,7 +1121,8 @@ private enum CodexLineageIndex {
           CodexLogScanner.tokenCountMarker,
           CodexLogScanner.sessionMetadataMarker,
           CodexLogScanner.interAgentMarker,
-        ]
+        ],
+        cancellationCheck: cancellationCheck
       ) { data, lineNumber in
         onDeepScanLine(data, lineNumber)
         guard
@@ -994,6 +1207,7 @@ private enum CodexLineageIndex {
       where
         acceptedBoundary.map({ parsedLine.lineNumber >= $0.startLineNumber }) ?? true
       {
+        try cancellationCheck()
         let event = parsedLine.event
         let snapshot = lineageSnapshot(for: event, in: &session)
         if retainCandidateEvents {
